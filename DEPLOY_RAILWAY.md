@@ -43,7 +43,7 @@ CONI_DEFAULT_LAUNCH_FEE_BPS=500
 CONI_BOT_FUNDING_FEE_BPS=0
 CONI_DEFAULT_COST_BUFFER_BPS=55
 CONI_RPC_URLS={"ethereum":"<server-side RPC URL>","base":"<server-side RPC URL>","robinhood":"<server-side RPC URL>","bsc":"<server-side RPC URL>"}
-CONI_EXPECTED_CHAIN_IDS={"ethereum":"0x1","base":"0x2105","bsc":"0x38"}
+CONI_EXPECTED_CHAIN_IDS={"ethereum":"0x1","base":"0x2105","robinhood":"0x1237","bsc":"0x38"}
 CONI_SOLANA_RPC_URL=<server-side Solana RPC URL>
 CONI_DEPOSIT_CONFIRMATIONS=12
 CONI_DEPOSIT_MAX_AGE_MINUTES=1440
@@ -101,7 +101,7 @@ Create a separate private Railway service from `railway.arbitrage.toml`:
 python manage.py scan_arbitrage --loop-seconds 30
 ```
 
-Set `CONI_ARBITRAGE_REQUIRE_QUOTES=true` and configure only public bot wallet addresses for quote requests. The worker evaluates every profitable cross-chain pool direction for each Pangea launch (up to `CONI_ARBITRAGE_MAX_CANDIDATES`), then requests exact quotes for the highest-gap routes. It follows buy → Pangea canonical bridge quote → sell-on-delivered-amount, persists rejected/take-paper decisions, and never signs or broadcasts. Each authenticated identity also receives five durable bot-wallet placeholders; an address is usable only after the private signer/MPC service provisions and attests it through the private callback endpoint. It must not be treated as a live trader until the signer, simulation, approval, bridge-arrival, and reconciliation controls are independently reviewed.
+Set `CONI_ARBITRAGE_REQUIRE_QUOTES=true` and configure only public bot wallet addresses for quote requests. The worker evaluates every profitable cross-chain pool direction for each Pangea launch by default (`CONI_ARBITRAGE_MAX_CANDIDATES=0`); a positive value is an explicit operator cap. Exact quote requests remain bounded by `CONI_ARBITRAGE_MAX_QUOTE_REQUESTS` so Pangea rate limits are respected. It follows buy → Pangea canonical bridge quote → sell-on-delivered-amount, persists rejected/take-paper decisions, and never signs or broadcasts. Each authenticated identity also receives five durable bot-wallet placeholders; an address is usable only after the private signer/MPC service provisions and attests it through the private callback endpoint. It must not be treated as a live trader until the signer, simulation, approval, bridge-arrival, and reconciliation controls are independently reviewed.
 
 ## Quote-bound execution planner
 
