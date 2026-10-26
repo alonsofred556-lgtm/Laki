@@ -103,6 +103,25 @@ class SignerPolicyTests(unittest.TestCase):
                 "expiresAt": expires,
             }]))
 
+    def test_configured_two_person_approval_is_required_and_digest_bound(self):
+        policy = SignerPolicy(
+            mode="live",
+            audit_approved=True,
+            allowed_recipients={"base": "0x1111111111111111111111111111111111111111"},
+            max_value_base_units=1000,
+            required_approvals=2,
+        )
+        with self.assertRaises(PolicyError):
+            policy.validate(intent())
+        first = policy.validate(intent(approvalRefs=["operator-a", "operator-b"]))
+        second = policy.validate(intent(approvalRefs=["operator-a", "operator-c"]))
+        self.assertEqual(first["approvalRefs"], ["operator-a", "operator-b"])
+        self.assertNotEqual(first["digest"], second["digest"])
+
+    def test_approval_count_is_bounded(self):
+        with self.assertRaises(ValueError):
+            SignerPolicy(required_approvals=5)
+
 
 if __name__ == "__main__":
     unittest.main()

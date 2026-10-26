@@ -40,7 +40,7 @@ class SignerPolicy:
     evm_address_re = re.compile(r"^0x[a-fA-F0-9]{40}$")
     solana_address_re = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
-    def __init__(self, *, mode="disabled", audit_approved=False, max_expiry_seconds=90, allowed_recipients=None, max_value_base_units=0, max_total_value_base_units=None):
+    def __init__(self, *, mode="disabled", audit_approved=False, max_expiry_seconds=90, allowed_recipients=None, max_value_base_units=0, max_total_value_base_units=None, required_approvals=0):
         self.mode = mode
         self.audit_approved = audit_approved
         self.max_expiry_seconds = max_expiry_seconds
@@ -62,6 +62,9 @@ class SignerPolicy:
             if max_total_value_base_units is not None
             else max_value_base_units or 0
         )
+        self.required_approvals = int(required_approvals or 0)
+        if self.required_approvals < 0 or self.required_approvals > 4:
+            raise ValueError("required approvals must be between 0 and 4")
 
     def validate(self, payload):
         if not isinstance(payload, dict):
@@ -80,6 +83,14 @@ class SignerPolicy:
             raise PolicyError("maximum transaction value is not configured")
         if self.max_total_value_base_units <= 0:
             raise PolicyError("maximum total transaction value is not configured")
+        approval_refs = payload.get("approvalRefs", [])
+        if self.required_approvals:
+            if not isinstance(approval_refs, list) or len(approval_refs) != self.required_approvals:
+                raise PolicyError("required approval references are missing")
+            if any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{8,128}", item) for item in approval_refs) or len(set(approval_refs)) != len(approval_refs):
+                raise PolicyError("approval references are invalid")
+        elif approval_refs not in (None, []) and not isinstance(approval_refs, list):
+            raise PolicyError("approval references must be a list")
         expires_at = int(payload.get("expiresAt", 0))
         now = int(datetime.now(timezone.utc).timestamp())
         if expires_at <= now or expires_at > now + self.max_expiry_seconds:
@@ -111,8 +122,9 @@ class SignerPolicy:
             normalized.append(SignStep(chain, recipient, str(step["valueBaseUnits"]), str(step["calldataHash"]), expires_at))
         if total_value > self.max_total_value_base_units:
             raise PolicyError("total transaction value exceeds signer policy")
-        digest = hashlib.sha256(_canonical({"idempotencyKey": payload["idempotencyKey"], "quoteHash": quote_hash, "simulationHash": simulation_hash, "expiresAt": expires_at, "steps": [step.__dict__ for step in normalized]}).encode()).hexdigest()
-        return {"digest": digest, "quoteHash": quote_hash, "simulationHash": simulation_hash, "idempotencyKey": payload["idempotencyKey"], "steps": normalized}
+        canonical_approvals = [str(item) for item in approval_refs] if isinstance(approval_refs, list) else []
+        digest = hashlib.sha256(_canonical({"idempotencyKey": payload["idempotencyKey"], "quoteHash": quote_hash, "simulationHash": simulation_hash, "expiresAt": expires_at, "approvalRefs": canonical_approvals, "steps": [step.__dict__ for step in normalized]}).encode()).hexdigest()
+        return {"digest": digest, "quoteHash": quote_hash, "simulationHash": simulation_hash, "idempotencyKey": payload["idempotencyKey"], "approvalRefs": canonical_approvals, "steps": normalized}
 
     def sign(self, payload, adapter=None):
         intent = self.validate(payload)

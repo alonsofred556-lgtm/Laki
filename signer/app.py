@@ -24,6 +24,7 @@ class SignIntent(BaseModel):
     quoteHash: str
     simulationHash: str
     expiresAt: int
+    approvalRefs: list[str] = Field(default_factory=list, max_length=4)
     steps: list[Step] = Field(min_length=1, max_length=8)
 
 
@@ -57,6 +58,7 @@ def sign_intent(payload: SignIntent, authorization: str | None = Header(default=
         max_value_base_units=os.environ.get("SIGNER_MAX_VALUE_BASE_UNITS", "0"),
         max_total_value_base_units=os.environ.get("SIGNER_MAX_TOTAL_VALUE_BASE_UNITS")
         or os.environ.get("SIGNER_MAX_VALUE_BASE_UNITS", "0"),
+        required_approvals=os.environ.get("SIGNER_REQUIRED_APPROVALS", "0"),
     )
     try:
         validated = policy.validate(payload.model_dump())
