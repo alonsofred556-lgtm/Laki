@@ -45,6 +45,10 @@ CONI_OPS_TOKEN=<long random operations token>
 CONI_EXECUTION_MODE=disabled
 CONI_SIGNER_URL=
 CONI_LIVE_TRADING_CONFIRMATION=
+CONI_RPC_URLS=<JSON map of server-side EVM RPC URLs>
+CONI_EXPECTED_CHAIN_IDS=<JSON map of verified EVM chain IDs>
+CONI_SOLANA_RPC_URL=<server-side Solana RPC URL>
+CONI_DEPOSIT_CONFIRMATIONS=12
 ```
 
 Add `CONI_FUNDING_RECIPIENTS` and `CONI_FEE_RECIPIENTS` only after the recipient addresses have been independently checked. Leave them empty while custody and withdrawals are disabled.
@@ -74,6 +78,7 @@ The web process must use Gunicorn through `railway.toml`; do not use Django's `r
 - Rotate `DJANGO_SECRET_KEY`, operations tokens, RPC credentials, and database credentials through a planned maintenance window.
 - Monitor failed logins, unusual ledger writes, migration failures, and repeated API errors.
 - Treat the ledger as append-only. Corrections should be new compensating entries, never edits or deletes of historical entries.
+- Run the deposit verifier as a separate worker with restricted RPC credentials and monitor its provider errors, rejected claims, and credited observations.
 
 ## 6. What is still intentionally disabled
 

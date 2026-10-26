@@ -1,0 +1,7 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python manage.py verify_deposits --loop-seconds 30"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

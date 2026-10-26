@@ -29,6 +29,8 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - The wallet page supports user-approved EIP-1193 EVM providers and public Solana wallet providers. It reads public addresses and balances only.
 - An internal Coni Vault is deliberately staged, not browser-generated. A production embedded wallet requires an isolated signer, threshold authorization, hardware-backed secret storage, withdrawal allowlists, rate limits, pause/rotate controls, immutable audit events, and recovery drills.
 - Funding intents are created by the backend from server-owned destinations. The client cannot choose a treasury address, and the backend does not broadcast the transaction.
+- A funding claim is only an untrusted transaction-hash hint. The verifier worker checks the configured RPC network, sender, destination, exact amount, receipt status, and finality before creating the idempotent double-entry ledger credit.
+- Withdrawal requests reserve ledger balance and remain pending approval. Only a future signer/treasury service may complete or release the reservation.
 - Wallet connection state is treated as untrusted input. Every address is validated for its target chain, every funding amount is bounded, and every quote expires.
 
 ## Planned services
@@ -42,6 +44,7 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - `mcp-operations`: fixed allowlist for health, scans, bot status, profit summaries, fee status, and pause/configuration; it cannot sign or withdraw.
 - `django-api`: canonical Python API, Postgres migrations, wallet authentication, Pangea proxy, fee accounting, and bot policy endpoints.
 - `signer-treasury`: separate private service, not included in this repository, responsible for policy-checked signing, withdrawals, fee sweeps, key ceremonies, and emergency recovery.
+- `deposit-verifier`: separate worker using server-side RPC endpoints; it has no private keys and can only move a verified observation into the ledger through the Django transaction boundary.
 
 ## First implementation gate
 

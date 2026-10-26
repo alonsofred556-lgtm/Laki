@@ -34,6 +34,8 @@ Create a Railway service from this repository and a managed PostgreSQL service. 
 - An execution-plan boundary that explains the route, estimated fees, and risk gates without accepting arbitrary calldata or broadcasting transactions.
 - Wallet control center with EIP-1193 EVM connections and Phantom/Solflare/Backpack-compatible Solana connections.
 - Native balance reads and a funding-intent boundary that refuses arbitrary destinations.
+- Non-custodial funding claim and verification workflow with idempotent deposit observations, finality checks, and double-entry ledger crediting.
+- Withdrawal request and balance-reservation workflow that remains signer- and broadcast-gated.
 - Coni-branded logo and wordmark assets reused from the supplied theme.
 - Responsive website shell and compact extension popup.
 - No seed phrases or private keys are exposed. Deposits, withdrawals, bridge transactions, and automatic trading remain disabled until the audited signer/treasury boundary is supplied.

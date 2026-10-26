@@ -31,6 +31,12 @@ CONI_FEE_RECIPIENTS={"ETH":"<reviewed Ethereum fee destination>","BNB":"<reviewe
 CONI_TRADING_FEE_BPS=25
 CONI_BOT_FUNDING_FEE_BPS=0
 CONI_DEFAULT_COST_BUFFER_BPS=55
+CONI_RPC_URLS={"ethereum":"<server-side RPC URL>","base":"<server-side RPC URL>","robinhood":"<server-side RPC URL>","bsc":"<server-side RPC URL>"}
+CONI_EXPECTED_CHAIN_IDS={"ethereum":"0x1","base":"0x2105","bsc":"0x38"}
+CONI_SOLANA_RPC_URL=<server-side Solana RPC URL>
+CONI_DEPOSIT_CONFIRMATIONS=12
+CONI_DEPOSIT_MAX_AGE_MINUTES=1440
+CONI_DEPOSIT_SCAN_BATCH=50
 ```
 
 Do not use zero addresses, burn addresses, user wallet addresses, or example values. Verify every destination on the intended chain before accepting funds.
@@ -45,7 +51,23 @@ python manage.py migrate
 python manage.py check --deploy
 ```
 
-The migration creates wallet challenges, identities, ledger accounts, funding intents, fee events, bot controls, and execution records.
+The migration creates wallet challenges, identities, ledger accounts, funding intents, deposit observations, withdrawal requests, fee events, bot controls, and execution records.
+
+## Funding verification worker
+
+The funding flow is non-custodial: the user approves a transfer in an external wallet, submits the transaction hash, and a separate verifier confirms the exact sender, destination, amount, successful receipt, network identity, and finality before crediting the ledger. Create a second Railway service from this repository and set its config file to `railway.worker.toml`; it uses the same database and server-side RPC variables:
+
+```text
+python manage.py verify_deposits --loop-seconds 30
+```
+
+For a one-off test:
+
+```text
+python manage.py verify_deposits --once
+```
+
+Do not run the worker until every RPC URL and expected chain ID has been checked. The worker never signs, broadcasts, or withdraws funds.
 
 ## Smoke checks
 

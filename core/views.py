@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 
 import base58
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.http import FileResponse, HttpRequest, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -18,7 +18,8 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
 from .layerzero import route_summary
-from .models import BotControl, Execution, FeeEvent, FundingIntent, WalletChallenge, WalletIdentity
+from .funding import InsufficientBalance, reserve_withdrawal
+from .models import BotControl, DepositObservation, Execution, FeeEvent, FundingIntent, WalletChallenge, WalletIdentity, WithdrawalRequest
 from .pangea import PangeaError, request_json, scan_opportunities
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
@@ -27,6 +28,9 @@ ASSET_DECIMALS = {"ETH": 18, "BNB": 18, "SOL": 9}
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,80}$", re.I)
 EVM_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 SOL_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+EVM_TX_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
+SOL_TX_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{40,100}$")
+IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
 
 def api_response(data, status=200, request=None, extra=None):
@@ -290,11 +294,175 @@ def funding_intent(request):
             return error("funding destination or amount is not configured", 503, request)
         expires = timezone.now() + timedelta(minutes=5)
         intent = FundingIntent.objects.create(wallet_identity=identity, asset=asset, chain=identity.chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
-        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "amount": amount, "destination": destination, "expiresAt": expires.isoformat()}, 201, request)
+        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": identity.chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "expiresAt": expires.isoformat()}, 201, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
         return error(str(exc), 400, request)
+
+
+@csrf_exempt
+def funding_claim(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        identity = require_session(request)
+        data = body(request)
+        intent = FundingIntent.objects.filter(id=data.get("intentId"), wallet_identity=identity).first()
+        tx_hash = str(data.get("txHash", ""))
+        try:
+            event_index = int(data.get("eventIndex", 0))
+        except (TypeError, ValueError):
+            event_index = -1
+        if not intent or intent.expires_at <= timezone.now() or intent.status in {"credited", "cancelled"}:
+            return error("funding intent is unavailable", 409, request)
+        if event_index < 0 or event_index > 10_000:
+            return error("invalid event index", 400, request)
+        if identity.chain in EVM_CHAINS and not EVM_TX_RE.fullmatch(tx_hash):
+            return error("invalid EVM transaction hash", 400, request)
+        if identity.chain == "solana" and not SOL_TX_RE.fullmatch(tx_hash):
+            return error("invalid Solana transaction signature", 400, request)
+        event_hash_key = tx_hash.lower() if identity.chain in EVM_CHAINS else tx_hash
+        event_key = f"{identity.chain}:{event_hash_key}:{event_index}"
+        observation, created = DepositObservation.objects.get_or_create(
+            event_key=event_key,
+            defaults={
+                "funding_intent": intent,
+                "wallet_identity": identity,
+                "asset": intent.asset,
+                "chain": intent.chain,
+                "sender": identity.address,
+                "destination": intent.destination,
+                "tx_hash": tx_hash,
+                "event_index": event_index,
+                "amount_base_units": intent.amount_base_units,
+                "status": "pending-verification",
+            },
+        )
+        if observation.wallet_identity_id != identity.id:
+            return error("transaction is already claimed by another wallet", 409, request)
+        if created and intent.status == "awaiting-wallet-approval":
+            intent.status = "pending-verification"
+            intent.save(update_fields=["status"])
+        return api_response({
+            "observationId": str(observation.id),
+            "intentId": str(intent.id),
+            "state": observation.status,
+            "txHash": observation.tx_hash,
+            "message": "The verifier must confirm the on-chain transaction before the ledger is credited.",
+        }, 202 if created else 200, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 400, request)
+
+
+def funding_status(request, intent_id):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    intent = FundingIntent.objects.filter(id=intent_id, wallet_identity=identity).first()
+    if not intent:
+        return error("funding intent not found", 404, request)
+    observations = DepositObservation.objects.filter(funding_intent=intent).order_by("-observed_at")
+    return api_response({
+        "intentId": str(intent.id),
+        "state": intent.status,
+        "asset": intent.asset,
+        "chain": intent.chain,
+        "amountBaseUnits": str(intent.amount_base_units),
+        "expiresAt": intent.expires_at.isoformat(),
+        "observations": [{
+            "id": str(item.id),
+            "state": item.status,
+            "txHash": item.tx_hash,
+            "confirmations": item.confirmations,
+            "rejectionCode": item.rejection_code,
+            "observedAt": item.observed_at.isoformat(),
+            "confirmedAt": item.confirmed_at.isoformat() if item.confirmed_at else None,
+            "creditedAt": item.credited_at.isoformat() if item.credited_at else None,
+        } for item in observations],
+    }, 200, request)
+
+
+@csrf_exempt
+def withdrawal_request(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        identity = require_session(request)
+        data = body(request)
+        asset = str(data.get("asset", "")).upper()
+        amount = str(data.get("amount", ""))
+        destination = data.get("destination")
+        idempotency_key = str(data.get("idempotencyKey", ""))
+        if asset not in ASSET_DECIMALS or not wallet_address_valid(identity.chain, destination) or not IDEMPOTENCY_RE.fullmatch(idempotency_key):
+            return error("invalid withdrawal request", 400, request)
+        if asset == "SOL" and identity.chain != "solana" or asset == "BNB" and identity.chain != "bsc" or asset == "ETH" and identity.chain == "bsc":
+            return error("withdrawal asset does not match connected chain", 400, request)
+        amount_base = decimal_units(amount, ASSET_DECIMALS[asset])
+        if not amount_base:
+            return error("invalid withdrawal amount", 400, request)
+        existing = WithdrawalRequest.objects.filter(idempotency_key=idempotency_key).first()
+        if existing:
+            if existing.wallet_identity_id != identity.id:
+                return error("idempotency key is already in use", 409, request)
+            return api_response({"withdrawalId": str(existing.id), "state": existing.status, "nonce": existing.nonce}, 200, request)
+        with transaction.atomic():
+            withdrawal = WithdrawalRequest.objects.create(
+                idempotency_key=idempotency_key,
+                wallet_identity=identity,
+                asset=asset,
+                chain=identity.chain,
+                amount_base_units=amount_base,
+                destination=destination,
+                status="pending-approval",
+                nonce=secrets.token_hex(24),
+                expires_at=timezone.now() + timedelta(minutes=15),
+            )
+            reserve_withdrawal(withdrawal.id)
+        return api_response({
+            "withdrawalId": str(withdrawal.id),
+            "state": withdrawal.status,
+            "asset": withdrawal.asset,
+            "chain": withdrawal.chain,
+            "amountBaseUnits": str(withdrawal.amount_base_units),
+            "destination": withdrawal.destination,
+            "nonce": withdrawal.nonce,
+            "message": "Withdrawal is reserved for review. No transaction has been signed or broadcast.",
+        }, 201, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except InsufficientBalance as exc:
+        return error(str(exc), 409, request)
+    except IntegrityError:
+        return error("idempotency key is already in use", 409, request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 400, request)
+
+
+def withdrawal_status(request, withdrawal_id):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    withdrawal = WithdrawalRequest.objects.filter(id=withdrawal_id, wallet_identity=identity).first()
+    if not withdrawal:
+        return error("withdrawal not found", 404, request)
+    return api_response({
+        "withdrawalId": str(withdrawal.id),
+        "state": withdrawal.status,
+        "asset": withdrawal.asset,
+        "chain": withdrawal.chain,
+        "amountBaseUnits": str(withdrawal.amount_base_units),
+        "destination": withdrawal.destination,
+        "nonce": withdrawal.nonce,
+        "txHash": withdrawal.tx_hash,
+        "failureCode": withdrawal.failure_code,
+        "requestedAt": withdrawal.requested_at.isoformat(),
+        "expiresAt": withdrawal.expires_at.isoformat(),
+    }, 200, request)
 
 
 def bot_status_view(request):

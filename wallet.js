@@ -1,6 +1,8 @@
 (() => {
   const config = window.CONI_CONFIG;
   const state = { evm: null, solana: null };
+  let activeIntent = null;
+  let fundingPollTimer = null;
   const STORAGE_KEY = "coni.wallet.connections.v1";
   const $ = (selector) => document.querySelector(selector);
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
@@ -167,15 +169,79 @@
       const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, wallet: asset === "SOL" ? state.solana?.address : state.evm?.address }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Funding intent rejected");
-      $("#funding-status").textContent = `Intent ${result.intentId} is ready. Review the destination and approve in your wallet; Coni will not auto-submit it.`;
+      activeIntent = result;
+      $("#funding-status").textContent = `Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}. Review the full destination in your wallet before approving.`;
+      $("#approve-funding").hidden = !(result.chain !== "solana" && state.evm?.provider && !state.evm?.restored);
+      $("#funding-hash-row").hidden = false;
+      $("#claim-funding").hidden = false;
     } catch {
       $("#funding-status").textContent = "No funding intent was created. The secure backend destination is not configured in this build, so no funds can move.";
+    }
+  }
+
+  function toBaseUnits(value, decimals) {
+    const [whole, fraction = ""] = value.split(".");
+    if (fraction.length > decimals) throw new Error("Amount has too many decimal places");
+    return BigInt(`${whole}${fraction.padEnd(decimals, "0")}`);
+  }
+
+  async function claimFunding(txHash) {
+    if (!activeIntent || !txHash) throw new Error("Create a funding intent and provide a transaction hash first");
+    const response = await fetch(`${config.apiBaseUrl}/api/funding/claim`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ intentId: activeIntent.intentId, txHash }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Funding claim rejected");
+    $("#funding-status").textContent = "Transfer submitted for server verification. The ledger is credited only after finality is confirmed.";
+    $("#approve-funding").hidden = true;
+    watchFundingStatus();
+    return result;
+  }
+
+  async function watchFundingStatus() {
+    if (!activeIntent) return;
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/funding/status/${encodeURIComponent(activeIntent.intentId)}`, { credentials: "include", cache: "no-store" });
+      if (response.ok) {
+        const result = await response.json();
+        const latest = result.observations?.[0];
+        if (result.state === "credited") {
+          $("#funding-status").textContent = "Funding confirmed and credited to the ledger.";
+          return;
+        }
+        if (latest?.state === "rejected") {
+          $("#funding-status").textContent = `Funding was rejected: ${latest.rejectionCode || "transaction did not match the intent"}.`;
+          return;
+        }
+        if (latest?.state === "pending-verification" || latest?.state === "verifying") {
+          $("#funding-status").textContent = `Verifying transfer${latest.confirmations ? ` · ${latest.confirmations} confirmations` : ""}…`;
+        }
+      }
+    } catch { /* polling is best effort; the status can be refreshed later */ }
+    clearTimeout(fundingPollTimer);
+    fundingPollTimer = setTimeout(watchFundingStatus, 5000);
+  }
+
+  async function approveFunding() {
+    if (!activeIntent || !state.evm?.provider || state.evm.restored) throw new Error("Reconnect the EVM wallet before approving");
+    const value = `0x${toBaseUnits(activeIntent.amount, activeIntent.asset === "BNB" ? 18 : 18).toString(16)}`;
+    $("#funding-status").textContent = "Reviewing the exact destination and amount in your wallet…";
+    const txHash = await state.evm.provider.request({ method: "eth_sendTransaction", params: [{ from: state.evm.address, to: activeIntent.destination, value }] });
+    $("#funding-tx-hash").value = txHash;
+    await claimFunding(txHash);
+  }
+
+  async function submitFundingClaim() {
+    try {
+      await claimFunding($("#funding-tx-hash").value.trim());
+    } catch (error) {
+      $("#funding-status").textContent = error?.message || "Could not submit funding for verification.";
     }
   }
 
   $("#connect-evm").addEventListener("click", connectEvm);
   $("#connect-solana").addEventListener("click", connectSolana);
   $("#prepare-funding").addEventListener("click", prepareFunding);
+  $("#approve-funding").addEventListener("click", () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; }));
+  $("#claim-funding").addEventListener("click", submitFundingClaim);
   $("#vault-setup").addEventListener("click", () => { $("#vault-modal").hidden = false; document.body.style.overflow = "hidden"; });
   document.addEventListener("click", (event) => { if (event.target.matches("[data-close-modal]") || event.target.classList.contains("modal-backdrop")) { event.target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; } });
   restoreConnectionLabels();
