@@ -15,6 +15,14 @@ audited MPC/HSM system, then call `/api/internal/signer/bot-wallet-attest` with
 the `provisionRequestId`, public address, opaque `signerKeyRef`, and attestation
 hash. Never send a private key to Django.
 
+`signer/django_client.py` contains the provider-neutral, HMAC-authenticated
+transport for this exchange. The HSM/MPC adapter should call
+`DjangoSignerClient.pull_provision_requests()`, create or allocate the key
+inside custody, and call `attest_bot_wallet()`. The client rejects unexpected
+fields and invalid chain/address/hash values before any callback is sent. It
+does not generate wallets, sign transactions, or provide a software-key
+fallback.
+
 For bot-wallet top-ups and withdrawals, the adapter may call
 `/api/internal/signer/bot-transfer-event` with only the transfer UUID, a
 strict lifecycle event (`submitted`, `confirmed`, or `failed`), an
@@ -29,6 +37,14 @@ recipient, USDG token, `robinhood` chain, and base-unit amount. Coni credits
 the user's ledger only after that proof-bound callback.
 
 The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), and `SIGNER_MAX_VALUE_BASE_UNITS` through Railway Variables or a secret manager. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing.
+
+For the provisioning transport, configure the private signer with
+`SIGNER_DJANGO_API_URL` (the private Django base URL) and
+`CONI_SIGNER_PROVISION_SECRET` (a separate 32+ character callback secret).
+The secret must match Django's variable of the same name and must not be
+reused as `SIGNER_SHARED_SECRET` or as any custody credential. Construct the
+client with those values and call its methods from the audited adapter's
+worker; do not expose either value to the browser.
 
 Run locally only for policy tests:
 
