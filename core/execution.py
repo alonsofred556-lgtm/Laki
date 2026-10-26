@@ -84,6 +84,7 @@ def execution_payload(execution):
         "slug": execution.slug,
         "state": execution.state,
         "botWalletId": str(execution.bot_wallet_id) if execution.bot_wallet_id else None,
+        "sellBotWalletId": str(execution.sell_bot_wallet_id) if execution.sell_bot_wallet_id else None,
         "opportunityId": str(execution.opportunity_id) if execution.opportunity_id else None,
         "expectedNetBps": execution.expected_net_bps,
         "expectedProfitUsd": str(execution.expected_profit_usd) if execution.expected_profit_usd is not None else None,
@@ -137,7 +138,7 @@ def execution_payload(execution):
 
 def signer_intent_payload(execution):
     """Return the private signer handoff for one hash-bound execution plan."""
-    execution = Execution.objects.select_related("bot_wallet", "opportunity").prefetch_related("legs").get(id=execution.id)
+    execution = Execution.objects.select_related("bot_wallet", "sell_bot_wallet", "opportunity").prefetch_related("legs").get(id=execution.id)
     if execution.state not in {"planned", "awaiting-signer"}:
         raise ValueError("execution is not awaiting signer handoff")
     if not execution.quote_hash or not isinstance(execution.quote_artifact, dict) or not execution.quote_artifact.get("trade") or not execution.quote_artifact.get("bridge"):
@@ -157,6 +158,12 @@ def signer_intent_payload(execution):
             "address": execution.bot_wallet.address if execution.bot_wallet else None,
             "signerKeyRef": execution.bot_wallet.signer_key_ref if execution.bot_wallet else None,
         },
+        "sellBotWallet": {
+            "id": str(execution.sell_bot_wallet_id) if execution.sell_bot_wallet_id else None,
+            "chain": execution.sell_bot_wallet.chain if execution.sell_bot_wallet else None,
+            "address": execution.sell_bot_wallet.address if execution.sell_bot_wallet else None,
+            "signerKeyRef": execution.sell_bot_wallet.signer_key_ref if execution.sell_bot_wallet else None,
+        },
         "legs": [{
             "kind": leg.kind,
             "chain": leg.chain,
@@ -169,7 +176,7 @@ def signer_intent_payload(execution):
 
 
 @transaction.atomic
-def create_execution_from_opportunity(*, identity: WalletIdentity, opportunity_id, bot_wallet: BotWallet, decision=None, quote_hash=None):
+def create_execution_from_opportunity(*, identity: WalletIdentity, opportunity_id, bot_wallet: BotWallet, sell_bot_wallet: BotWallet | None = None, decision=None, quote_hash=None):
     """Create one execution plan from one fresh, quote-bound opportunity."""
     opportunity = ArbitrageOpportunity.objects.select_for_update().get(id=opportunity_id)
     decision = decision if isinstance(decision, dict) else opportunity.decision
@@ -187,12 +194,21 @@ def create_execution_from_opportunity(*, identity: WalletIdentity, opportunity_i
         raise ValueError("quote artifact does not match quote hash")
     if bot_wallet.owner_id != identity.id or bot_wallet.chain != opportunity.buy_chain or bot_wallet.status != "active" or not bot_wallet.address:
         raise ValueError("source bot wallet is not active for this opportunity")
+    if (
+        not sell_bot_wallet
+        or sell_bot_wallet.owner_id != identity.id
+        or sell_bot_wallet.chain != opportunity.sell_chain
+        or sell_bot_wallet.status != "active"
+        or not sell_bot_wallet.address
+    ):
+        raise ValueError("destination bot wallet is not active for this opportunity")
 
     execution, created = Execution.objects.get_or_create(
         opportunity=opportunity,
         user_identity=identity,
         defaults={
             "bot_wallet": bot_wallet,
+            "sell_bot_wallet": sell_bot_wallet,
             "slug": opportunity.slug,
             "state": "planned",
             "expected_net_bps": int(decision.get("netBps", opportunity.net_bps)),

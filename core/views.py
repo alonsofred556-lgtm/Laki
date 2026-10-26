@@ -1010,7 +1010,7 @@ def execution_plan(request):
             fresh = fresh_user_quotes(opportunity, buy_wallet=bot_wallet.address, sell_wallet=sell_wallet.address)
         except PangeaError as exc:
             return api_response({"error": "fresh opportunity quote rejected", "reason": str(exc), "status": status}, 409, request)
-        execution = create_execution_from_opportunity(identity=identity, opportunity_id=opportunity.id, bot_wallet=bot_wallet, decision=fresh, quote_hash=fresh["quoteHash"])
+        execution = create_execution_from_opportunity(identity=identity, opportunity_id=opportunity.id, bot_wallet=bot_wallet, sell_bot_wallet=sell_wallet, decision=fresh, quote_hash=fresh["quoteHash"])
         return api_response({"execution": execution_payload(execution), "next": "The signer adapter must independently validate and sign the exact Pangea transaction steps."}, 202, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)

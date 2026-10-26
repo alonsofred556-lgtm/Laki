@@ -82,6 +82,7 @@ class Command(BaseCommand):
                         identity=identity,
                         opportunity_id=opportunity.id,
                         bot_wallet=buy_wallet,
+                        sell_bot_wallet=sell_wallet,
                         decision=decision,
                         quote_hash=decision["quoteHash"],
                     )

@@ -293,6 +293,7 @@ class Execution(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_identity = models.ForeignKey(WalletIdentity, null=True, on_delete=models.PROTECT, db_column="user_identity_id")
     bot_wallet = models.ForeignKey(BotWallet, null=True, blank=True, on_delete=models.PROTECT, related_name="executions")
+    sell_bot_wallet = models.ForeignKey(BotWallet, null=True, blank=True, on_delete=models.PROTECT, related_name="sell_executions")
     opportunity = models.ForeignKey("ArbitrageOpportunity", null=True, blank=True, on_delete=models.PROTECT, related_name="executions")
     slug = models.CharField(max_length=80)
     state = models.CharField(max_length=32)
