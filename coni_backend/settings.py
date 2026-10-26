@@ -167,7 +167,9 @@ CONI_ARBITRAGE_SLIPPAGE_BPS = int(os.environ.get("CONI_ARBITRAGE_SLIPPAGE_BPS", 
 CONI_ARBITRAGE_REQUIRE_QUOTES = os.environ.get("CONI_ARBITRAGE_REQUIRE_QUOTES", "true").lower() == "true"
 CONI_ARBITRAGE_MAX_BRIDGE_SECONDS = int(os.environ.get("CONI_ARBITRAGE_MAX_BRIDGE_SECONDS", "120"))
 CONI_ARBITRAGE_MAX_QUOTE_REQUESTS = int(os.environ.get("CONI_ARBITRAGE_MAX_QUOTE_REQUESTS", "20"))
-CONI_ARBITRAGE_MAX_CANDIDATES = int(os.environ.get("CONI_ARBITRAGE_MAX_CANDIDATES", "500"))
+# Enumerate every valid Pangea route by default. Set a positive value only as
+# an explicit operational safety cap; quote requests remain separately bounded.
+CONI_ARBITRAGE_MAX_CANDIDATES = int(os.environ.get("CONI_ARBITRAGE_MAX_CANDIDATES", "0"))
 CONI_BOT_WALLETS = os.environ.get("CONI_BOT_WALLETS", "{}")
 CONI_PROFIT_SETTLEMENT_ASSET = "USDG"
 CONI_PROFIT_SETTLEMENT_CHAIN = "robinhood"

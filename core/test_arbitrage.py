@@ -79,3 +79,10 @@ class ArbitrageDecisionTests(SimpleTestCase):
         self.assertEqual([(row[1]["chain"], row[2]["chain"]) for row in routes], [
             ("base", "bsc"), ("base", "ethereum"), ("ethereum", "bsc"),
         ])
+
+    @override_settings(CONI_ARBITRAGE_MAX_CANDIDATES=0)
+    def test_candidate_routes_has_no_hidden_default_cap(self):
+        pools = [{"chain": "base", "token": f"0xb{i}", "priceUsd": "1"} for i in range(2)]
+        pools += [{"chain": "bsc", "token": f"0xc{i}", "priceUsd": "2"} for i in range(260)]
+        routes = candidate_routes({"launches": [{"slug": "many", "pools": pools}]})
+        self.assertGreater(len(routes), 500)

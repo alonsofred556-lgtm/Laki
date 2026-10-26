@@ -330,8 +330,9 @@ def candidate_routes(data, *, max_candidates=None):
                 candidates.append((launch, buy, sell))
     candidates.sort(key=lambda item: (_pool_price(item[2]) / _pool_price(item[1]) - 1), reverse=True)
     if max_candidates is None:
-        max_candidates = int(getattr(settings, "CONI_ARBITRAGE_MAX_CANDIDATES", 500))
-    return candidates[:max(1, max_candidates)]
+        configured_cap = int(getattr(settings, "CONI_ARBITRAGE_MAX_CANDIDATES", 0))
+        max_candidates = configured_cap if configured_cap > 0 else None
+    return candidates if max_candidates is None else candidates[:max_candidates]
 
 
 def scan_opportunities(*, persist=True):
