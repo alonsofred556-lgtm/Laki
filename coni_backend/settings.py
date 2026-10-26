@@ -1,12 +1,14 @@
 import os
 from pathlib import Path
 
-
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "development-only-change-me")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
-if not DEBUG and SECRET_KEY == "development-only-change-me":
-    raise RuntimeError("DJANGO_SECRET_KEY must be set when DEBUG=false")
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "development-only-change-me"
+    else:
+        raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=false")
 
 ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if host.strip()]
 ROOT_URLCONF = "coni_backend.urls"
@@ -44,21 +46,21 @@ TEMPLATES = [{
     ]},
 }]
 
-DATABASES = {}
-if os.environ.get("DATABASE_URL"):
-    import dj_database_url
+import dj_database_url
 
-    database_url = os.environ["DATABASE_URL"]
-    is_sqlite = database_url.lower().startswith(("sqlite://", "sqlite3://"))
-    DATABASES["default"] = dj_database_url.parse(
+database_url = os.environ.get("DATABASE_URL", "").strip()
+if not database_url:
+    raise RuntimeError("DATABASE_URL must be set to a PostgreSQL connection string")
+if not database_url.lower().startswith(("postgres://", "postgresql://")):
+    raise RuntimeError("DATABASE_URL must use PostgreSQL (postgres:// or postgresql://)")
+
+DATABASES = {
+    "default": dj_database_url.parse(
         database_url,
         conn_max_age=60,
-        ssl_require=(not is_sqlite and os.environ.get("DATABASE_SSL", "require") != "disable"),
+        ssl_require=os.environ.get("DATABASE_SSL", "require").lower() != "disable",
     )
-elif DEBUG:
-    DATABASES["default"] = {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}
-else:
-    raise RuntimeError("DATABASE_URL must be set when DJANGO_DEBUG=false")
+}
 
 SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"
 SESSION_COOKIE_NAME = "coni_session"

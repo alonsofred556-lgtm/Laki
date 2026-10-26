@@ -6,7 +6,7 @@ This milestone ships a responsive website, a dedicated wallet control page, a Ch
 
 ## Run locally
 
-Install the Python dependencies, migrate the local development database, and run Django:
+Install PostgreSQL locally (or use a managed PostgreSQL development database), then set its connection URL before migrating Django:
 
 ```text
 python -m venv .venv
@@ -14,6 +14,8 @@ python -m venv .venv
 python -m pip install -r requirements.lock
 $env:DJANGO_DEBUG="true"
 $env:DJANGO_SECRET_KEY="local-development-secret"
+$env:DATABASE_URL="postgresql://coni:password@127.0.0.1:5432/coni"
+$env:DATABASE_SSL="disable"
 python manage.py migrate
 python manage.py runserver 127.0.0.1:8000
 ```

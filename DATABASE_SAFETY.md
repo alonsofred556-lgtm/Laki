@@ -1,6 +1,6 @@
 # Coni database safety and Railway setup
 
-This project now uses Django migrations as the canonical database schema. The old `backend/schema.sql` file is retained only as a legacy Node reference and must not be applied to a new Django database.
+This project now requires PostgreSQL and uses Django migrations as the canonical database schema. The old `backend/schema.sql` file is retained only as a legacy Node reference and must not be applied to a new Django database.
 
 ## 1. Create a separate production database
 
