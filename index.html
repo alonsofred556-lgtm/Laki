@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#081011" />
+    <title>Coni — cross-chain execution console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="#overview" aria-label="Coni home">
+          <img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" />
+          <span><strong>coni</strong><small>cross-chain desk</small></span>
+        </a>
+        <div class="side-label">Workspace</div>
+        <nav class="nav-stack">
+          <a class="nav-item active" href="#overview"><span>◈</span>Overview</a>
+          <a class="nav-item" href="#opportunities"><span>⌁</span>Opportunities <em id="nav-opportunity-count">03</em></a>
+          <a class="nav-item" href="wallet.html"><span>◉</span>Wallet</a>
+          <a class="nav-item" href="#activity"><span>↗</span>Activity</a>
+        </nav>
+        <div class="side-label">System</div>
+        <nav class="nav-stack">
+          <a class="nav-item" href="#settings"><span>◌</span>Settings</a>
+          <a class="nav-item" href="#docs"><span>?</span>Docs</a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="scanner-state"><i></i><span><strong>Scanner live</strong><small id="last-sync">Reading Pangea</small></span></div>
+          <div class="mode-chip"><span class="mode-dot"></span> PAPER MODE <b>ON</b></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="mobile-brand"><img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" /><strong>coni</strong></div>
+          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong>Overview</strong></div>
+          <div class="top-actions">
+            <button class="icon-button" aria-label="Notifications">◔<span class="notification-dot"></span></button>
+            <button class="wallet-button" id="wallet-button"><span class="wallet-orb"></span><span id="wallet-label">Connect wallet</span><b></b></button>
+          </div>
+        </header>
+
+        <section class="content-wrap" id="overview">
+          <div class="eyebrow"><span class="live-pulse"></span> Cross-chain intelligence <span class="eyebrow-divider"></span> <span id="feed-label">Pangea live feed</span></div>
+          <div class="hero-row">
+            <div>
+              <h1>Catch the gap.<br /><em>Keep the edge.</em></h1>
+              <p class="hero-copy">Coni scans Pangea’s five pools, filters out noise, and surfaces the routes that are worth your attention.</p>
+            </div>
+            <div class="hero-brief">
+              <span class="orbit orbit-one"></span><span class="orbit orbit-two"></span><span class="orbit-core">C</span>
+              <div class="hero-brief-text"><small>Current focus</small><strong>$ZGAP</strong><span>5 chains · 1 market</span></div>
+            </div>
+          </div>
+
+          <div class="metrics-grid">
+            <article class="metric-card metric-primary"><div class="metric-top"><span>Portfolio value</span><span class="metric-icon">◈</span></div><strong>$0.00</strong><div class="metric-bottom"><span class="muted">Connect a wallet to begin</span><span class="sparkline green"></span></div></article>
+            <article class="metric-card"><div class="metric-top"><span>Session edge</span><span class="metric-icon green-text">↗</span></div><strong id="metric-edge">—</strong><div class="metric-bottom"><span class="green-text">Observed spread</span><span class="metric-note">paper only</span></div></article>
+            <article class="metric-card"><div class="metric-top"><span>Routes ready</span><span class="metric-icon purple-text">⌁</span></div><strong id="metric-routes">03</strong><div class="metric-bottom"><span class="muted">Across 5 chains</span><span class="status-badge">SCANNING</span></div></article>
+          </div>
+
+          <div class="section-heading" id="opportunities"><div><span class="section-kicker">01 / SCAN RESULTS</span><h2>Opportunities <sup id="opportunity-count">03</sup></h2></div><button class="ghost-button" id="refresh-button">Refresh scan <span>↻</span></button></div>
+          <div class="workspace-grid">
+            <section class="opportunity-panel">
+              <div class="panel-head"><div><strong>Live routes</strong><span>Ranked by net edge after estimated costs</span></div><div class="filter-tabs"><button class="filter-tab active">All</button><button class="filter-tab">ZGAP</button><button class="filter-tab">New</button></div></div>
+              <div class="opportunity-list" id="opportunity-list"></div>
+              <div class="panel-foot"><span><i class="tiny-live"></i> Data refreshes every 15 seconds</span><a href="https://www.pangea.trade/app/docs#api" target="_blank" rel="noreferrer">View Pangea docs ↗</a></div>
+            </section>
+
+            <aside class="side-panel" id="vault">
+              <div class="side-panel-title"><span>Vault overview</span><button class="more-button">•••</button></div>
+              <div class="vault-empty"><div class="vault-ring"><span>◉</span></div><strong>Your vault is quiet.</strong><p>Connect an external wallet to track balances and prepare routes.</p><button class="primary-button" id="vault-connect">Connect external wallet <span>↗</span></button></div>
+              <div class="chain-strip"><span>Supported networks</span><div><b class="chain eth">E</b><b class="chain base">B</b><b class="chain rh">R</b><b class="chain bnb">B</b><b class="chain sol">S</b></div></div>
+            </aside>
+          </div>
+
+          <section class="lower-grid" id="activity">
+            <article class="activity-card"><div class="section-heading compact"><div><span class="section-kicker">02 / TAPE</span><h2>Recent activity</h2></div><a href="#activity" class="text-link">See all ↗</a></div><div id="activity-feed"><div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>Reading Pangea activity…</strong><p>Recent trades and bridge transfers will appear here.</p></div></div></div></article>
+            <article class="risk-card"><div class="section-heading compact"><div><span class="section-kicker">03 / GUARDRAILS</span><h2>Coni safety layer</h2></div><span class="shield">✦</span></div><div class="risk-row"><span class="risk-check">✓</span><div><strong>Paper execution enabled</strong><small>No transaction can be submitted from this build.</small></div></div><div class="risk-row"><span class="risk-check">✓</span><div><strong>Stale quote protection</strong><small>Routes expire when the feed goes quiet.</small></div></div><div class="risk-row"><span class="risk-check">✓</span><div><strong>Cost-aware scoring</strong><small>Gas, spread, liquidity, and bridge risk are visible.</small></div></div></article>
+          </section>
+
+          <footer class="site-footer" id="docs"><span>Coni is an independent interface for Pangea market data.</span><span>Read-only preview · Not financial advice</span></footer>
+        </section>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="wallet-modal" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="wallet-modal-title"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">WALLET GATE</span><h2 id="wallet-modal-title">Your keys stay yours.</h2><p>Coni’s first build is read-only. The production wallet layer will use external wallet providers for signing and will never ask this site for a seed phrase or private key.</p><div class="provider-list"><button class="provider-row" data-connect-provider="EVM wallet"><span class="provider-icon eth">E</span><span><strong>EVM wallet</strong><small>Ethereum · Base · Robinhood · BNB</small></span><b>↗</b></button><button class="provider-row" data-connect-provider="Solana wallet"><span class="provider-icon sol">S</span><span><strong>Solana wallet</strong><small>Solana · Meteora routes</small></span><b>↗</b></button></div><div class="modal-note"><span>i</span> No wallet request is sent in paper mode.</div></div></div>
+    <div class="modal-backdrop" id="preview-modal" hidden><div class="modal preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">PAPER PREVIEW</span><h2 id="preview-title">Route preview</h2><div class="preview-route" id="preview-route"></div><div class="preview-stats" id="preview-stats"></div><div class="preview-quote" id="preview-quote" aria-live="polite">No quote requested.</div><div class="modal-note"><span>✓</span> This preview does not sign, approve, bridge, or trade.</div></div></div>
+
+    <script src="config.js"></script><script src="app.js"></script>
+  </body>
+</html>

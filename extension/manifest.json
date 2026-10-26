@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Coni — Pangea scanner",
+  "version": "0.1.0",
+  "description": "Read-only cross-chain opportunity scanner for Pangea.",
+  "action": {
+    "default_title": "Open Coni scanner",
+    "default_popup": "popup2.html"
+  },
+  "host_permissions": ["https://www.pangea.trade/*"],
+  "permissions": ["storage"]
+}

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#071011" />
+    <title>Coni Wallet — control center</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="index.html#overview" aria-label="Coni home">
+          <img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" />
+          <span><strong>coni</strong><small>cross-chain desk</small></span>
+        </a>
+        <div class="side-label">Workspace</div>
+        <nav class="nav-stack">
+          <a class="nav-item" href="index.html#overview"><span>◈</span>Overview</a>
+          <a class="nav-item" href="index.html#opportunities"><span>⌁</span>Opportunities</a>
+          <a class="nav-item active" href="wallet.html"><span>◉</span>Wallet</a>
+          <a class="nav-item" href="index.html#activity"><span>↗</span>Activity</a>
+        </nav>
+        <div class="side-label">System</div>
+        <nav class="nav-stack">
+          <a class="nav-item" href="index.html#settings"><span>◌</span>Settings</a>
+          <a class="nav-item" href="index.html#docs"><span>?</span>Docs</a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="scanner-state"><i></i><span><strong>Wallet layer ready</strong><small id="wallet-sync">Awaiting approval</small></span></div>
+          <div class="mode-chip"><span class="mode-dot"></span> PAPER MODE <b>ON</b></div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="mobile-brand"><img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" /><strong>coni</strong></div>
+          <div class="breadcrumb"><span>Workspace</span><b>/</b><strong>Wallet</strong></div>
+          <div class="top-actions"><a class="wallet-button" href="index.html#overview"><span class="wallet-orb"></span>Back to overview <b>↗</b></a></div>
+        </header>
+
+        <section class="content-wrap wallet-page" id="wallet-page">
+          <div class="eyebrow"><span class="live-pulse"></span> Wallet control center <span class="eyebrow-divider"></span> <span id="wallet-feed-label">Non-custodial connections</span></div>
+          <div class="wallet-title-row"><div><h1>One wallet view.<br /><em>Five networks.</em></h1><p class="hero-copy">Connect external wallets, read balances, and prepare bot funding with a visible approval boundary. Coni never asks for a seed phrase.</p></div><div class="wallet-wordmark-lockup"><img src="assets/coni_wordmark-1.png" alt="Coni" /><span>Secure wallet surface</span></div></div>
+
+          <div class="security-banner"><span class="security-icon">✦</span><div><strong>Non-custodial by default</strong><p>Wallets sign in their own extension or app. Coni receives public addresses and signed results only.</p></div><span class="security-status">KEYS NEVER LEAVE WALLET</span></div>
+
+          <div class="wallet-grid">
+            <section class="wallet-card connections-card"><div class="wallet-card-head"><div><span class="section-kicker">01 / IDENTITY</span><h2>Connected wallets</h2></div><span class="live-tag" id="connection-count">0 connected</span></div><div class="connection-list" id="connection-list"><div class="wallet-empty"><span class="empty-orb">◉</span><strong>No wallet connected</strong><p>Choose an EVM wallet or a Solana wallet to begin reading your balances.</p></div></div><div class="connect-actions"><button class="primary-button" id="connect-evm">Connect EVM wallet <span>↗</span></button><button class="secondary-button" id="connect-solana">Connect Solana wallet <span>↗</span></button></div><p class="wallet-help" id="wallet-message" aria-live="polite">Supports injected EIP-1193 wallets such as MetaMask, Rabby, Coinbase, OKX, and Phantom EVM, plus Phantom, Solflare, and Backpack on Solana.</p></section>
+            <section class="wallet-card vault-card"><div class="wallet-card-head"><div><span class="section-kicker">02 / CONI VAULT</span><h2>Internal wallet</h2></div><span class="vault-state">STAGED</span></div><div class="vault-visual"><div class="vault-ring large"><span>✦</span></div><div><strong>Coni Vault is protected behind an audit gate.</strong><p>The production embedded wallet will use an isolated signer service with threshold authorization, withdrawal policy checks, hardware-backed secrets, and recovery drills. This browser build does not generate or store a seed phrase.</p></div></div><div class="vault-policy"><div><span>01</span><strong>Policy controlled</strong><small>No arbitrary destination</small></div><div><span>02</span><strong>Auditable</strong><small>Every approval logged</small></div><div><span>03</span><strong>Recoverable</strong><small>Pause and rotate access</small></div></div><button class="secondary-button full-width" id="vault-setup">Open secure vault setup <span>→</span></button></section>
+          </div>
+
+          <section class="wallet-card assets-card"><div class="wallet-card-head"><div><span class="section-kicker">03 / ASSET VIEW</span><h2>Tracked assets</h2></div><span class="live-tag" id="asset-refresh-status">Reading live balances</span></div><div class="asset-table" id="asset-table"><div class="asset-row asset-header"><span>Asset</span><span>Network</span><span>Balance</span><span>Value</span><span>Status</span></div><div class="asset-row"><span class="asset-name"><b class="token-logo zgap-logo"><span id="zgap-logo-fallback">ZG</span><img id="zgap-logo" class="token-logo-image" alt="" hidden /></b><strong>$ZGAP<small>Zero Gap</small></strong></span><span class="network-pill">5-chain route</span><span id="zgap-balance">—</span><span id="zgap-value">—</span><span class="asset-state">TRACKING</span></div><div class="asset-row"><span class="asset-name"><b class="token-logo eth-logo">Ξ</b><strong>ETH<small>Native gas</small></strong></span><span class="network-pill">Ethereum · Base · RH</span><span id="eth-balance">Connect wallet</span><span>—</span><span class="asset-state muted-state">WAITING</span></div><div class="asset-row"><span class="asset-name"><b class="token-logo sol-logo">S</b><strong>SOL<small>Native gas</small></strong></span><span class="network-pill">Solana</span><span id="sol-balance">Connect wallet</span><span>—</span><span class="asset-state muted-state">WAITING</span></div></div></section>
+
+          <section class="wallet-card funding-card" id="funding"><div class="wallet-card-head"><div><span class="section-kicker">04 / BOT FUNDING</span><h2>Prepare funding</h2></div><span class="vault-state">APPROVAL REQUIRED</span></div><div class="funding-layout"><div><p class="funding-copy">Funding is always a user-approved transaction from the connected wallet. Coni will only prepare a request after the backend returns a whitelisted destination and a fresh quote.</p><div class="funding-form"><label>Asset<select id="funding-asset"><option value="ETH">ETH</option><option value="BNB">BNB</option><option value="SOL">SOL</option></select></label><label>Amount<input id="funding-amount" inputmode="decimal" placeholder="0.00" /></label><button class="primary-button" id="prepare-funding">Prepare funding <span>→</span></button></div></div><div class="funding-guard"><span class="security-icon">✓</span><strong>Transaction guard</strong><p id="funding-status">No funding request has been created. A destination must be supplied by the secure backend.</p></div></div></section>
+
+          <footer class="site-footer"><span>Coni wallet control center · public data only until approval</span><span>Not financial advice</span></footer>
+        </section>
+      </main>
+    </div>
+    <div class="modal-backdrop" id="vault-modal" hidden><div class="modal" role="dialog" aria-modal="true"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">SECURE VAULT SETUP</span><h2>Embedded custody is gated.</h2><p>Before Coni can hold assets internally, we need an audited signer boundary, encrypted key ceremony, withdrawal policy, recovery path, and independent review. This build leaves the vault inactive and keeps funds in user-controlled wallets.</p><div class="modal-note"><span>i</span> No key or wallet request is created here.</div></div></div>
+    <script src="config.js"></script><script src="wallet.js"></script>
+  </body>
+</html>
