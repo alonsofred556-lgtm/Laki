@@ -139,7 +139,7 @@
     if (!item) return;
     $("#preview-title").textContent = `$${item.symbol} route preview`;
     $("#preview-route").innerHTML = `<strong>${chainNames[item.cheapest.chain]}</strong> <span>→</span> <strong>${chainNames[item.dearest.chain]}</strong><br><small>Buy on the cheaper pool, bridge only if required, then sell on the dearer pool.</small>`;
-    $("#preview-stats").innerHTML = [["Observed spread", `+${item.gross.toFixed(2)}%`], ["Net estimate", `+${item.net.toFixed(2)}%`], ["Min. route depth", compact(item.depth)], ["Mode", "Paper only"]].map(([label, value]) => `<div class="preview-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
+    $("#preview-stats").innerHTML = [["Observed spread", `+${item.gross.toFixed(2)}%`], ["Net estimate", `+${item.net.toFixed(2)}%`], ["Min. route depth", compact(item.depth)], ["Mode", "Read-only quotes"]].map(([label, value]) => `<div class="preview-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
     $("#preview-quote").textContent = "Requesting read-only Pangea trade and bridge quotes…";
     openModal("#preview-modal");
     loadRouteQuotes(item);
@@ -182,7 +182,7 @@
     if (event.target.classList.contains("modal-backdrop")) closeModal(event.target);
     if (event.target.closest("#wallet-button, #vault-connect")) openModal("#wallet-modal");
     const provider = event.target.closest("[data-connect-provider]");
-    if (provider) { $("#wallet-label").textContent = "Paper wallet"; closeModal(provider); }
+    if (provider) { $("#wallet-label").textContent = "Connected wallet"; closeModal(provider); }
   });
   $("#refresh-button").addEventListener("click", load);
   render();

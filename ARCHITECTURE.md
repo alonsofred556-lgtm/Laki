@@ -13,14 +13,15 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - The backend also proxies `/history`, `/bridge/activity`, `/token/meta`, `/v1/launches`, `/trade/quote`, and `/bridge/quote`; quote responses are expiring, untrusted data and are never signed or broadcast by Coni.
 - A cross-chain transfer uses LayerZero OFT semantics and has its own fee and delivery risk. A bridge is not free inventory movement.
 
-## Safety boundaries
+## Production boundaries
 
 1. The browser must never receive a raw private key or seed phrase.
 2. WalletConnect/external wallets sign; Coni only prepares and explains transactions.
 3. Every opportunity is quoted for a concrete size. Spot spread alone is not profit.
 4. Net edge must include trading fees, bridge fees, gas, quote-asset conversion, price impact, slippage, and a stale-quote buffer.
 5. Execution is a state machine with idempotency keys, per-chain nonce control, and recovery for partial fills, bridge delays, reverted transactions, and insufficient native gas.
-6. Paper mode is the default. Live trading requires an explicit user-controlled mode switch and a final wallet confirmation for each transaction until a separately audited automation policy exists.
+6. `CONI_EXECUTION_MODE=disabled` is the default. Live trading requires Postgres, an explicit bot policy, a separately audited signer/treasury service, quote simulation, and an emergency pause.
+7. Fee destinations are server-side configuration only. Fee accrual is recorded in `fee_events`; transfer to the configured recipient is a signer/treasury responsibility.
 
 ## Wallet boundary
 
@@ -36,7 +37,10 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - `execution-coordinator`: creates unsigned steps and tracks them; it never owns keys.
 - `wallet-adapter`: EVM WalletConnect/injected providers plus Solana wallet-adapter.
 - `ledger`: records quote, consent, transaction hashes, bridge messages, realized P&L, and failure reason.
+- `auth`: nonce-based EVM/Solana wallet ownership verification and short-lived sessions.
+- `mcp-operations`: fixed allowlist for health, scans, bot status, profit summaries, fee status, and pause/configuration; it cannot sign or withdraw.
+- `signer-treasury`: separate private service, not included in this repository, responsible for policy-checked signing, withdrawals, fee sweeps, key ceremonies, and emergency recovery.
 
 ## First implementation gate
 
-Read-only `/trade/quote` and `/bridge/quote` proxies are allowed for sizing and preview. Do not wire approvals, bridging, or transaction submission until the normalized schema, risk gates, signing UX, and failure state machine have tests. The UI in this milestone makes that limitation visible instead of presenting simulated profits as realized returns.
+Read-only `/trade/quote` and `/bridge/quote` proxies are allowed for sizing and discovery. `/api/auth/*`, the Postgres schema, bot policy controls, fee accrual records, and the operations MCP surface are now implemented. Do not wire approvals, bridging, or transaction submission until the normalized schema, risk gates, signer contract, and failure state machine have integration tests. The application continues to make that limitation visible instead of presenting expected profit as realized returns.
