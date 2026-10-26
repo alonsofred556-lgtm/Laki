@@ -6,6 +6,7 @@ import path from "node:path";
 
 const ROOT = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PORT = Number(process.env.PORT || 4173);
+const HOST = process.env.HOST || "0.0.0.0";
 const PANGEA_POOLS = "https://www.pangea.trade/api/pools";
 const PANGEA_TOKEN_META = "https://www.pangea.trade/api/token/meta";
 const PANGEA_HISTORY = "https://www.pangea.trade/api/history";
@@ -222,4 +223,4 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, "127.0.0.1", () => console.log(`Coni backend listening on http://127.0.0.1:${PORT}`));
+server.listen(PORT, HOST, () => console.log(`Coni backend listening on http://${HOST}:${PORT}`));

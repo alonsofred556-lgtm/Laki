@@ -14,6 +14,10 @@ python -m http.server 4173
 
 Open `http://127.0.0.1:4173/` for the website and `http://127.0.0.1:4173/wallet.html` for the wallet page. For the API boundary, run `node backend/server.mjs`. The extension source is in `extension/`; load that folder as an unpacked extension in Chrome when you are ready to preview the popup.
 
+## Railway deployment
+
+Create a Railway service from this repository. Railway will use the `start` script in `package.json`; it injects `PORT`, and the server binds to `0.0.0.0`. Set `CONI_ALLOWED_ORIGINS` to the generated Railway domain and configure `CONI_FUNDING_RECIPIENTS` only with reviewed production destinations. Use `/api/health` as the service health-check path. Do not enable custody, signing, or automated trading from environment variables until the signer and execution services have been independently audited.
+
 ## Current scope
 
 - Live read-only Pangea `/api/pools` polling with a safe fallback snapshot, plus backend-proxied token metadata/logo resolution.
