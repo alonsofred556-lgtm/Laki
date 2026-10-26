@@ -139,6 +139,13 @@ def wallet_address_valid(chain, address):
     return bool(SOL_RE.fullmatch(address)) and address != "1" * 32
 
 
+def wallet_address_matches(chain, supplied, expected):
+    """EVM addresses are case-insensitive; Solana base58 addresses are not."""
+    if not isinstance(supplied, str) or not isinstance(expected, str):
+        return False
+    return supplied == expected if chain == "solana" else supplied.lower() == expected.lower()
+
+
 def valid_amount(value):
     return isinstance(value, str) and re.fullmatch(r"\d{1,78}", value or "") and int(value) > 0
 
@@ -283,15 +290,19 @@ def auth_verify(request):
         return limited
     try:
         data = body(request)
-        challenge = WalletChallenge.objects.filter(id=data.get("challengeId"), consumed_at__isnull=True, expires_at__gt=timezone.now()).first()
-        if not challenge or data.get("address", "").lower() != challenge.address.lower() or not isinstance(data.get("signature"), str):
+        supplied_address = data.get("address")
+        challenge = WalletChallenge.objects.filter(id=data.get("challengeId"), expires_at__gt=timezone.now()).first()
+        if not challenge or not wallet_address_matches(challenge.chain, supplied_address, challenge.address) or not isinstance(data.get("signature"), str):
             return error("challenge expired or invalid", 401, request)
         if not verify_signature(challenge, data["signature"]):
             return error("wallet signature verification failed", 401, request)
         with transaction.atomic():
-            challenge.consumed_at = timezone.now()
-            challenge.save(update_fields=["consumed_at"])
-            identity, _ = WalletIdentity.objects.get_or_create(chain=challenge.chain, address=challenge.address)
+            locked_challenge = WalletChallenge.objects.select_for_update().filter(id=challenge.id, consumed_at__isnull=True, expires_at__gt=timezone.now()).first()
+            if not locked_challenge:
+                return error("challenge expired or already consumed", 401, request)
+            locked_challenge.consumed_at = timezone.now()
+            locked_challenge.save(update_fields=["consumed_at"])
+            identity, _ = WalletIdentity.objects.get_or_create(chain=locked_challenge.chain, address=locked_challenge.address)
             identity.last_authenticated_at = timezone.now()
             identity.save(update_fields=["last_authenticated_at"])
             bot_wallets = ensure_bot_wallets(identity, mode="external-bot")
@@ -333,6 +344,9 @@ def bot_wallet_view(request):
 def bot_wallet_provision(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "bot-wallet-provision", 10, 60)
+    if limited:
+        return limited
     try:
         identity = require_session(request)
         data = body(request)
@@ -355,6 +369,9 @@ def bot_wallet_provision(request):
 def bot_wallet_transfer(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "bot-wallet-transfer", 10, 60)
+    if limited:
+        return limited
     try:
         identity = require_session(request)
         data = body(request)
@@ -881,6 +898,10 @@ def bot_status_view(request):
 def user_bot_config(request):
     if request.method not in {"GET", "POST"} or (request.method == "POST" and not post_allowed(request)):
         return error("method or origin not allowed", 405 if request.method not in {"GET", "POST"} else 403, request)
+    if request.method == "POST":
+        limited = rate_limited(request, "user-bot-control", 20, 60)
+        if limited:
+            return limited
     try:
         identity = require_session(request)
         control = ensure_user_bot_control(identity)
