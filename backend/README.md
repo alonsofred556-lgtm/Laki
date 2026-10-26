@@ -8,7 +8,7 @@ The canonical production backend is Django in `coni_backend/` and `core/`. `serv
 - `/api/market/trade-quote` and `/api/market/bridge-quote` proxy read-only route pricing. They return quote data only; they never sign or broadcast transaction calls.
 - `/api/funding/intent` validates an asset, amount, wallet address, and server-owned allowlisted destination, then returns a short-lived intent. It does not move funds.
 - `/api/funding/claim` accepts a user-submitted transaction hash as an untrusted claim; `/api/funding/status/<intent-id>` reports verification state. Only `python manage.py verify_deposits` can confirm the chain transfer and credit the ledger.
-- `/api/funding/unclaimed` lists transfers automatically discovered into the authenticated user's active bot wallet; `/api/funding/claim-unclaimed` creates a verification intent for one exact observation. Claiming never credits funds by itself.
+- `/api/funding/unclaimed` lists transfers automatically discovered into the authenticated user's active bot wallet; `/api/funding/claim-unclaimed` creates a verification intent for one exact observation only while it is inside `CONI_DEPOSIT_MAX_AGE_MINUTES`. Claiming never credits funds by itself, and stale observations are rejected.
 - `/api/withdrawals/request` validates and reserves an available ledger balance for a withdrawal request. It never signs or broadcasts; `/api/withdrawals/status/<withdrawal-id>` reports the state.
 - `/api/health` exposes a minimal liveness check.
 - `/api/auth/challenge`, `/api/auth/verify`, `/api/auth/session`, and `/api/auth/logout` implement nonce-based off-chain wallet authentication for EVM and Solana wallets. They do not authorize transactions.

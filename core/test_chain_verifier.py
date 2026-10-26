@@ -1,4 +1,5 @@
 import os
+from datetime import timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,10 +11,22 @@ from django.test import SimpleTestCase, override_settings
 
 django.setup()
 
-from .chain_verifier import VerificationError, _verify_evm
+from django.utils import timezone
+
+from .chain_verifier import VerificationError, _verify_evm, observation_is_stale
 
 
 class ChainVerifierTests(SimpleTestCase):
+    @override_settings(CONI_DEPOSIT_MAX_AGE_MINUTES=30)
+    def test_observation_age_window_rejects_old_discoveries(self):
+        observation = SimpleNamespace(observed_at=timezone.now() - timedelta(minutes=31))
+        self.assertTrue(observation_is_stale(observation))
+
+    @override_settings(CONI_DEPOSIT_MAX_AGE_MINUTES=30)
+    def test_observation_age_window_accepts_recent_discoveries(self):
+        observation = SimpleNamespace(observed_at=timezone.now() - timedelta(minutes=29))
+        self.assertFalse(observation_is_stale(observation))
+
     @override_settings(
         CONI_RPC_URLS='{"base":"https://rpc.example"}',
         CONI_EXPECTED_CHAIN_IDS='{"base":"0x2105"}',

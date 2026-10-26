@@ -32,6 +32,7 @@ from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
 from .profit_settlement import prepare_usdg_settlement, record_usdg_settlement_event
 from .rate_limit import RateLimitUnavailable, allow as redis_allow
+from .chain_verifier import observation_is_stale
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 CHAINS = EVM_CHAINS | {"solana"}
@@ -733,6 +734,11 @@ def claim_unclaimed_deposit(request):
             ).first()
             if not observation:
                 return error("unclaimed deposit not found", 404, request)
+            if observation_is_stale(observation):
+                observation.status = "rejected"
+                observation.rejection_code = "deposit-too-old"
+                observation.save(update_fields=["status", "rejection_code"])
+                return error("unclaimed deposit is outside the configured verification age window", 409, request)
             bot_wallet = BotWallet.objects.filter(
                 owner=identity,
                 chain=observation.chain,

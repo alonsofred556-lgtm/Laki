@@ -1,6 +1,6 @@
 import json
 import time
-from datetime import datetime, timezone as datetime_timezone
+from datetime import datetime, timedelta, timezone as datetime_timezone
 
 import requests
 from django.conf import settings
@@ -18,6 +18,18 @@ class ProviderError(Exception):
 
 class VerificationError(Exception):
     pass
+
+
+def observation_is_stale(observation, now=None):
+    """Return whether a deposit observation exceeded the configured age window."""
+    observed_at = getattr(observation, "observed_at", None)
+    max_age_minutes = int(getattr(settings, "CONI_DEPOSIT_MAX_AGE_MINUTES", 0) or 0)
+    if not observed_at or max_age_minutes <= 0:
+        return False
+    if timezone.is_naive(observed_at):
+        observed_at = timezone.make_aware(observed_at, datetime_timezone.utc)
+    current = now or timezone.now()
+    return observed_at < current - timedelta(minutes=max_age_minutes)
 
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a8df523b3ef"
@@ -252,6 +264,9 @@ def _verify_solana(observation):
 def verify_observation(observation):
     if observation.status not in {"pending-verification", "verifying"}:
         return observation.status
+    if observation_is_stale(observation):
+        _reject(observation, "deposit-too-old")
+        return "rejected"
     observation.status = "verifying"
     observation.save(update_fields=["status"])
     try:

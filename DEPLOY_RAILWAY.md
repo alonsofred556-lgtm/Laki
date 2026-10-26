@@ -69,7 +69,7 @@ The migration creates wallet challenges, identities, per-chain bot-wallet record
 
 ## Funding verification worker
 
-The funding flow is non-custodial: the user approves a transfer in an external wallet, while the worker automatically discovers transfers to reviewed recipients and active per-user bot-wallet addresses, including Solana SPL token accounts. The discovery record remains `unclaimed` when it has no exact funding intent. An authenticated bot-wallet owner can claim one exact observation to create a verification intent; a separate verifier confirms the sender (when intent-bound), destination, asset, amount, network identity, and finality before crediting the ledger. Create a second Railway service from this repository and set its config file to `railway.worker.toml`; it uses the same database, Redis, and server-side RPC variables:
+The funding flow is non-custodial: the user approves a transfer in an external wallet, while the worker automatically discovers transfers to reviewed recipients and active per-user bot-wallet addresses, including Solana SPL token accounts. The discovery record remains `unclaimed` when it has no exact funding intent. An authenticated bot-wallet owner can claim one exact observation only inside `CONI_DEPOSIT_MAX_AGE_MINUTES`; stale observations are rejected. A separate verifier confirms the sender (when intent-bound), destination, asset, amount, network identity, and finality before crediting the ledger. Create a second Railway service from this repository and set its config file to `railway.worker.toml`; it uses the same database, Redis, and server-side RPC variables:
 
 ```text
 python manage.py verify_deposits --loop-seconds 30
