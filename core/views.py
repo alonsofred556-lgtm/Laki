@@ -26,7 +26,7 @@ from .assets import asset_decimals, native_asset, recipient_for, supported_asset
 from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
 from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletProvisionRequest, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
-from .bot_wallets import bot_wallet_payload, bot_wallet_summary, claim_provision_requests, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
+from .bot_wallets import bot_wallet_payload, bot_wallet_summary, chain_accessible, claim_provision_requests, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
 from .execution import create_execution_from_opportunity, execution_payload, record_execution_event, signer_intent_payload
 from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
@@ -571,24 +571,27 @@ def funding_intent(request):
         identity = require_session(request)
         data = body(request)
         asset, amount, wallet = str(data.get("asset", "")).upper(), str(data.get("amount", "")), data.get("wallet")
+        chain = str(data.get("chain") or identity.chain)
+        if not chain_accessible(identity, chain):
+            return error("authenticated wallet cannot fund this chain", 403, request)
         bot_wallet = None
         if data.get("botWalletId"):
-            bot_wallet = BotWallet.objects.filter(id=data.get("botWalletId"), owner=identity, chain=identity.chain, status="active").first()
+            bot_wallet = BotWallet.objects.filter(id=data.get("botWalletId"), owner=identity, chain=chain, status="active").first()
             if not bot_wallet or not bot_wallet.address:
                 return error("the selected bot wallet is not provisioned by the audited signer", 409, request)
-        decimals = asset_decimals(asset, identity.chain)
-        if not supported_asset(asset, identity.chain) or decimals is None or not wallet_address_valid(identity.chain, wallet) or wallet.lower() != identity.address.lower():
+        decimals = asset_decimals(asset, chain)
+        if not supported_asset(asset, chain) or decimals is None or not wallet_address_valid(chain, wallet) or wallet.lower() != identity.address.lower():
             return error("invalid funding request", 400, request)
-        if ((asset in ASSET_DECIMALS and asset != native_asset(identity.chain)) or (asset not in ASSET_DECIMALS and not supported_asset(asset, identity.chain))):
+        if ((asset in ASSET_DECIMALS and asset != native_asset(chain)) or (asset not in ASSET_DECIMALS and not supported_asset(asset, chain))):
             return error("funding asset does not match connected chain", 400, request)
         amount_base = decimal_units(amount, decimals)
-        destination = bot_wallet.address if bot_wallet else recipient_for(asset, identity.chain)
-        if not amount_base or not wallet_address_valid(identity.chain, destination):
+        destination = bot_wallet.address if bot_wallet else recipient_for(asset, chain)
+        if not amount_base or not wallet_address_valid(chain, destination):
             return error("funding destination or amount is not configured", 503, request)
         expires = timezone.now() + timedelta(minutes=5)
-        intent = FundingIntent.objects.create(wallet_identity=identity, bot_wallet=bot_wallet, asset=asset, chain=identity.chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
-        record_event("funding.intent.created", actor_type="wallet", actor_id=identity.id, subject_type="funding_intent", subject_id=intent.id, request_id=request_id(request), metadata={"asset": asset, "chain": identity.chain, "amountBaseUnits": amount_base})
-        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": identity.chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "botWalletId": str(bot_wallet.id) if bot_wallet else None, "expiresAt": expires.isoformat()}, 201, request)
+        intent = FundingIntent.objects.create(wallet_identity=identity, bot_wallet=bot_wallet, asset=asset, chain=chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
+        record_event("funding.intent.created", actor_type="wallet", actor_id=identity.id, subject_type="funding_intent", subject_id=intent.id, request_id=request_id(request), metadata={"asset": asset, "chain": chain, "amountBaseUnits": amount_base})
+        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "botWalletId": str(bot_wallet.id) if bot_wallet else None, "expiresAt": expires.isoformat()}, 201, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -615,12 +618,12 @@ def funding_claim(request):
             return error("funding intent is unavailable", 409, request)
         if event_index < 0 or event_index > 10_000:
             return error("invalid event index", 400, request)
-        if identity.chain in EVM_CHAINS and not EVM_TX_RE.fullmatch(tx_hash):
+        if intent.chain in EVM_CHAINS and not EVM_TX_RE.fullmatch(tx_hash):
             return error("invalid EVM transaction hash", 400, request)
-        if identity.chain == "solana" and not SOL_TX_RE.fullmatch(tx_hash):
+        if intent.chain == "solana" and not SOL_TX_RE.fullmatch(tx_hash):
             return error("invalid Solana transaction signature", 400, request)
-        event_hash_key = tx_hash.lower() if identity.chain in EVM_CHAINS else tx_hash
-        event_key = f"{identity.chain}:{event_hash_key}:{event_index}"
+        event_hash_key = tx_hash.lower() if intent.chain in EVM_CHAINS else tx_hash
+        event_key = f"{intent.chain}:{event_hash_key}:{event_index}"
         observation, created = DepositObservation.objects.get_or_create(
             event_key=event_key,
             defaults={

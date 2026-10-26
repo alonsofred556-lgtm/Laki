@@ -175,6 +175,23 @@ def _solana_instructions(transaction_data):
     return instructions
 
 
+def _solana_native_transfer_match(transaction_data, event_index, sender, destination, amount):
+    """Match the exact instruction index recorded by native SOL discovery."""
+    instructions = _solana_instructions(transaction_data)
+    if not isinstance(event_index, int) or event_index < 0 or event_index >= len(instructions):
+        return None
+    instruction = instructions[event_index]
+    parsed = instruction.get("parsed") or {}
+    info = parsed.get("info") or {}
+    if str(parsed.get("program") or instruction.get("program") or "").lower() != "system" or parsed.get("type") != "transfer":
+        return None
+    if info.get("source") != sender or info.get("destination") != destination:
+        return None
+    if int(info.get("lamports", 0)) != int(amount):
+        return None
+    return info
+
+
 def _verify_solana(observation):
     if not settings.CONI_SOLANA_RPC_URL:
         raise ProviderError("no Solana RPC configured")
@@ -203,9 +220,10 @@ def _verify_solana(observation):
     for index, instruction in enumerate(instructions):
         parsed = instruction.get("parsed") or {}
         info = parsed.get("info") or {}
-        if not expected_spl and parsed.get("type") == "transfer" and parsed.get("program") == "system":
-            if info.get("source") == observation.sender and info.get("destination") == observation.destination and int(info.get("lamports", 0)) == int(observation.amount_base_units):
-                matches.append(info)
+        if not expected_spl and index == observation.event_index:
+            native_match = _solana_native_transfer_match(transaction_data, observation.event_index, observation.sender, observation.destination, observation.amount_base_units)
+            if native_match:
+                matches.append(native_match)
         if expected_spl and index == observation.event_index and parsed.get("type") in {"transfer", "transferChecked"} and str(parsed.get("program") or instruction.get("program") or "").lower() in {"spl-token", "spl-token-2022", "spltoken"}:
             destination = info.get("destination")
             balance = post_balances.get(destination) or {}
@@ -213,7 +231,7 @@ def _verify_solana(observation):
             amount = amount_info.get("amount") or info.get("amount")
             if destination == raw_event.get("tokenAccount") and balance.get("owner") == observation.destination and balance.get("mint") == raw_event.get("mint") and (not raw_event.get("tokenProgram") or balance.get("programId") == raw_event.get("tokenProgram")) and (info.get("authority") or info.get("owner")) == observation.sender and int(amount or 0) == int(observation.amount_base_units):
                 matches.append(info)
-    if not matches or (not expected_spl and observation.event_index >= len(matches)):
+    if not matches:
         raise VerificationError("Solana transfer does not match funding intent")
     block_time = transaction_data.get("blockTime")
     raw = {**raw_event, "slot": transaction_data.get("slot"), "amount": str((matches[0].get("lamports") if not expected_spl else (matches[0].get("tokenAmount") or {}).get("amount") or matches[0].get("amount")))}

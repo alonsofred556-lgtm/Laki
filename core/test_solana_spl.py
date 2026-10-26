@@ -7,6 +7,7 @@ from django.test import SimpleTestCase
 
 django.setup()
 
+from .chain_verifier import _solana_native_transfer_match
 from .deposit_discovery import _solana_instruction_matches
 
 
@@ -28,3 +29,24 @@ class SolanaSplDiscoveryTests(SimpleTestCase):
         self.assertEqual(len(matches), 1)
         self.assertEqual(matches[0][2], "123")
         self.assertEqual(matches[0][1]["authority"], "sender-wallet")
+
+    def test_native_transfer_matches_its_original_instruction_index(self):
+        transaction = {
+            "transaction": {"message": {"instructions": [
+                {"program": "system", "parsed": {"type": "transfer", "info": {"source": "other", "destination": "other-destination", "lamports": 7}}},
+                {"program": "system", "parsed": {"type": "transfer", "info": {"source": "sender-wallet", "destination": "bot-wallet", "lamports": 123}}},
+            ]}},
+            "meta": {"innerInstructions": []},
+        }
+        match = _solana_native_transfer_match(transaction, 1, "sender-wallet", "bot-wallet", 123)
+        self.assertEqual(match["lamports"], 123)
+
+    def test_native_transfer_wrong_instruction_index_is_rejected(self):
+        transaction = {
+            "transaction": {"message": {"instructions": [
+                {"program": "system", "parsed": {"type": "transfer", "info": {"source": "sender-wallet", "destination": "bot-wallet", "lamports": 123}}},
+                {"program": "system", "parsed": {"type": "transfer", "info": {"source": "other", "destination": "other-destination", "lamports": 7}}},
+            ]}},
+            "meta": {"innerInstructions": []},
+        }
+        self.assertIsNone(_solana_native_transfer_match(transaction, 1, "sender-wallet", "bot-wallet", 123))

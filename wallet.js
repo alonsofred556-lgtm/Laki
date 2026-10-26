@@ -4,6 +4,7 @@
   let activeIntent = null;
   let fundingPollTimer = null;
   let activeBotWallet = null;
+  let botWalletSnapshot = null;
   let botFundingMode = false;
   let preferredBotMode = localStorage.getItem("coni.bot-wallet.mode.v1") || "external-bot";
   const STORAGE_KEY = "coni.wallet.connections.v1";
@@ -242,11 +243,13 @@
   async function prepareFunding() {
     const asset = $("#funding-asset").value;
     const amount = $("#funding-amount").value.trim();
-    if ((!state.evm || state.evm.restored) && (!state.solana || state.solana.restored)) { $("#funding-status").textContent = "Reconnect the wallet that will fund the bot so the approval can be tied to an active provider."; return; }
+    const requestedChain = botFundingMode ? activeBotWallet?.chain : (state.solana?.authenticated ? "solana" : state.evm?.chain);
+    const fundingAddress = requestedChain === "solana" ? state.solana?.address : state.evm?.address;
+    if (!requestedChain || !fundingAddress || (requestedChain === "solana" ? state.solana?.restored : state.evm?.restored)) { $("#funding-status").textContent = "Connect the wallet for the selected bot network before preparing funding."; return; }
     if (!/^\d+(\.\d{1,18})?$/.test(amount) || Number(amount) <= 0) { $("#funding-status").textContent = "Enter a positive amount with no more than 18 decimal places."; return; }
     $("#funding-status").textContent = "Asking the secure backend for a whitelisted funding intent…";
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, wallet: asset === "SOL" ? state.solana?.address : state.evm?.address, botWalletId: botFundingMode ? activeBotWallet?.id : null }) });
+      const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, chain: requestedChain, wallet: fundingAddress, botWalletId: botFundingMode ? activeBotWallet?.id : null }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Funding intent rejected");
       activeIntent = result;
@@ -302,6 +305,9 @@
 
   async function approveFunding() {
     if (!activeIntent || !state.evm?.provider || state.evm.restored) throw new Error("Reconnect the EVM wallet before approving");
+    const expectedChainId = config.wallets.evmChains[activeIntent.chain];
+    const actualChainId = Number.parseInt(await state.evm.provider.request({ method: "eth_chainId" }), 16);
+    if (expectedChainId && actualChainId !== expectedChainId) throw new Error(`Switch the connected EVM wallet to ${chainNames[expectedChainId] || activeIntent.chain} before approving`);
     const value = `0x${toBaseUnits(activeIntent.amount, activeIntent.asset === "BNB" ? 18 : 18).toString(16)}`;
     $("#funding-status").textContent = "Reviewing the exact destination and amount in your wallet…";
     const txHash = await state.evm.provider.request({ method: "eth_sendTransaction", params: [{ from: state.evm.address, to: activeIntent.destination, value }] });
@@ -330,26 +336,65 @@
     });
   }
 
+  function botWalletChoices() {
+    const wallets = botWalletSnapshot?.wallets || [];
+    const preferred = wallets.filter((item) => item.mode === preferredBotMode);
+    return preferred.length ? preferred : wallets.filter((item) => item.mode === "external-bot");
+  }
+
+  function renderBotWalletChoices() {
+    const select = $("#bot-wallet-chain");
+    if (!select) return;
+    const choices = botWalletChoices();
+    select.replaceChildren();
+    choices.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = `${chainNames[config.wallets.evmChains[item.chain]] || (item.chain === "solana" ? "Solana" : item.chain)} · ${item.status === "active" ? "active" : "awaiting provision"}`;
+      select.appendChild(option);
+    });
+    select.hidden = choices.length < 2;
+    if (activeBotWallet && choices.some((item) => item.id === activeBotWallet.id)) select.value = activeBotWallet.id;
+  }
+
+  function renderBotWalletSummary() {
+    const wallet = activeBotWallet;
+    if (!wallet) return;
+    setNativeAssetOptions(wallet.chain);
+    $("#internal-wallet-toggle").hidden = wallet.mode !== "internal-bot";
+    $("#bot-wallet-state").textContent = wallet.status === "active" ? "ACTIVE" : "GATED";
+    const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";
+    $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
+    const tokens = (botWalletSnapshot?.tradedTokens || []).map((item) => `<span class="network-pill">${esc(item.slug)}</span>`).join(" ") || "No completed token trades";
+    $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(botWalletSnapshot?.pnl?.realizedUsd || "0")}</b><small>${esc(botWalletSnapshot?.pnl?.settledTrades || 0)} settled trades · ${esc(botWalletSnapshot?.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (botWalletSnapshot?.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+  }
+
+  function selectBotWallet(walletId) {
+    const wallet = botWalletChoices().find((item) => item.id === walletId);
+    if (!wallet) return;
+    activeBotWallet = wallet;
+    renderBotWalletChoices();
+    renderBotWalletSummary();
+  }
+
   async function loadBotWallet() {
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet`, { credentials: "include", cache: "no-store" });
       if (response.status === 401) {
+        botWalletSnapshot = null;
+        activeBotWallet = null;
         $("#bot-wallet-state").textContent = "CONNECT FIRST";
         $("#bot-wallet-content").querySelector("p").textContent = "Connect and sign in with a wallet. Coni will then create this user's separate bot-wallet record.";
         return;
       }
       const result = await response.json();
+      botWalletSnapshot = result;
       const currentChain = state.solana?.authenticated ? "solana" : state.evm?.chain || result.currentChain;
-      const wallet = result.wallets?.find((item) => item.mode === preferredBotMode && item.chain === currentChain) || result.wallets?.find((item) => item.mode === "external-bot" && item.chain === currentChain) || result.currentWallet || result.wallets?.[0];
-      activeBotWallet = wallet || null;
-      setNativeAssetOptions(wallet?.chain);
-      $("#internal-wallet-toggle").hidden = wallet?.mode !== "internal-bot";
-      $("#bot-wallet-state").textContent = wallet?.status === "active" ? "ACTIVE" : "GATED";
-      if (!wallet) return;
-      const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";
-      $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
-      const tokens = (result.tradedTokens || []).map((item) => `<span class="network-pill">${esc(item.slug)}</span>`).join(" ") || "No completed token trades";
-      $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(result.pnl?.realizedUsd || "0")}</b><small>${esc(result.pnl?.settledTrades || 0)} settled trades · ${esc(result.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (result.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+      const choices = botWalletChoices();
+      activeBotWallet = choices.find((item) => item.chain === currentChain) || result.currentWallet || choices[0] || null;
+      renderBotWalletChoices();
+      renderBotWalletSummary();
+      if (!activeBotWallet) return;
       loadUnclaimedDeposits();
     } catch {
       $("#bot-wallet-state").textContent = "UNAVAILABLE";
@@ -454,7 +499,9 @@
     const decimals = asset === "SOL" ? 9 : 18;
     if (!/^\d+(\.\d+)?$/.test(amount)) throw new Error("enter a valid withdrawal amount");
     const amountBaseUnits = toBaseUnits(amount, decimals).toString();
-    const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/transfer`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ botWalletId: activeBotWallet.id, direction: "withdrawal", asset, amountBaseUnits, destination: state.solana?.address && asset === "SOL" ? state.solana.address : state.evm?.address, idempotencyKey: `bot-withdrawal-${crypto.randomUUID()}` }) });
+    const destination = activeBotWallet.chain === "solana" ? state.solana?.address : state.evm?.address;
+    if (!destination) throw new Error("Connect the wallet that owns this bot network before requesting withdrawal");
+    const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/transfer`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ botWalletId: activeBotWallet.id, direction: "withdrawal", asset, amountBaseUnits, destination, idempotencyKey: `bot-withdrawal-${crypto.randomUUID()}` }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || result.message || "withdrawal request rejected");
     $("#funding-status").textContent = `Bot withdrawal reserved for signer approval: ${result.state}. No transaction has been broadcast.`;
@@ -470,6 +517,7 @@
   $("#solana-wallet-choice")?.addEventListener("change", (event) => {
     if (event.target.value) localStorage.setItem(SOLANA_PROVIDER_KEY, event.target.value);
   });
+  $("#bot-wallet-chain")?.addEventListener("change", (event) => selectBotWallet(event.target.value));
   $("#prepare-funding").addEventListener("click", prepareFunding);
   $("#approve-funding").addEventListener("click", () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; }));
   $("#claim-funding").addEventListener("click", submitFundingClaim);

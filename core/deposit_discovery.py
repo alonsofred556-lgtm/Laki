@@ -188,48 +188,72 @@ def discover_evm_chain(chain):
         raise
 
 
+def _solana_native_recipients():
+    """Return the treasury and every active per-user SOL bot-wallet address."""
+    chain = "solana"
+    recipients = set()
+    treasury = recipient_for("SOL", chain)
+    if treasury:
+        recipients.add(treasury)
+    from .models import BotWallet
+    recipients.update(
+        wallet.address
+        for wallet in BotWallet.objects.filter(chain=chain, status="active").exclude(address="")
+        if wallet.address
+    )
+    return sorted(recipients, key=str.lower)
+
+
+def _solana_native_cursor(recipient):
+    digest = hashlib.sha256(recipient.lower().encode("utf-8")).hexdigest()[:20]
+    return ChainCursor.objects.get_or_create(key=f"solana:native:{digest}", defaults={"chain": "solana"})[0]
+
+
 def discover_solana():
     chain = "solana"
-    recipient = recipient_for("SOL", chain)
-    if not settings.CONI_SOLANA_RPC_URL or not recipient:
+    if not settings.CONI_SOLANA_RPC_URL:
         return {"chain": chain, "status": "unconfigured", "created": 0}
-    cursor, _ = ChainCursor.objects.get_or_create(key="solana:address", defaults={"chain": chain})
-    params = [recipient, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
-    if cursor.cursor_hash:
-        params[1]["before"] = cursor.cursor_hash
-    signatures = _rpc(settings.CONI_SOLANA_RPC_URL, "getSignaturesForAddress", params) or []
+    recipients = _solana_native_recipients()
+    if not recipients:
+        return {"chain": chain, "status": "unconfigured", "created": 0}
     created = 0
-    for item in reversed(signatures):
-        signature = item.get("signature")
-        if not signature or item.get("err"):
-            continue
-        transaction_data = _rpc(settings.CONI_SOLANA_RPC_URL, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
-        if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
-            continue
-        instructions = list(((transaction_data.get("transaction") or {}).get("message") or {}).get("instructions") or [])
-        for group in transaction_data.get("meta", {}).get("innerInstructions") or []:
-            instructions.extend(group.get("instructions") or [])
-        event_index = 0
-        for instruction in instructions:
-            parsed = instruction.get("parsed") or {}
-            info = parsed.get("info") or {}
-            if parsed.get("program") != "system" or parsed.get("type") != "transfer" or info.get("destination") != recipient:
+    scanned_recipients = 0
+    for recipient in recipients:
+        cursor = _solana_native_cursor(recipient)
+        params = [recipient, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
+        if cursor.cursor_hash:
+            params[1]["before"] = cursor.cursor_hash
+        signatures = _rpc(settings.CONI_SOLANA_RPC_URL, "getSignaturesForAddress", params) or []
+        for item in reversed(signatures):
+            signature = item.get("signature")
+            if not signature or item.get("err"):
                 continue
-            amount = int(info.get("lamports", 0))
-            if amount <= 0:
+            transaction_data = _rpc(settings.CONI_SOLANA_RPC_URL, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
+            if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
                 continue
-            _, was_created = _record_candidate(chain=chain, asset="SOL", sender=info.get("source", ""), destination=recipient, tx_hash=signature, event_index=event_index, amount=amount, block_number=transaction_data.get("slot"), block_hash=None, raw_event={"type": "solana-system-transfer", "slot": transaction_data.get("slot")})
-            created += int(was_created)
-            event_index += 1
-    if signatures:
-        cursor.cursor_hash = signatures[-1].get("signature")
-    cursor.status = "healthy"
-    cursor.last_scan_at = timezone.now()
-    cursor.last_success_at = timezone.now()
-    cursor.last_error = None
-    cursor.save(update_fields=["cursor_hash", "status", "last_scan_at", "last_success_at", "last_error", "updated_at"])
+            instructions = list(((transaction_data.get("transaction") or {}).get("message") or {}).get("instructions") or [])
+            for group in transaction_data.get("meta", {}).get("innerInstructions") or []:
+                instructions.extend(group.get("instructions") or [])
+            for event_index, instruction in enumerate(instructions):
+                parsed = instruction.get("parsed") or {}
+                info = parsed.get("info") or {}
+                if str(parsed.get("program") or instruction.get("program") or "").lower() != "system" or parsed.get("type") != "transfer" or info.get("destination") != recipient:
+                    continue
+                amount = int(info.get("lamports", 0))
+                if amount <= 0:
+                    continue
+                _, was_created = _record_candidate(chain=chain, asset="SOL", sender=info.get("source", ""), destination=recipient, tx_hash=signature, event_index=event_index, amount=amount, block_number=transaction_data.get("slot"), block_hash=None, raw_event={"type": "solana-system-transfer", "slot": transaction_data.get("slot")})
+                created += int(was_created)
+        if signatures:
+            cursor.cursor_hash = signatures[-1].get("signature")
+        cursor.status = "healthy"
+        cursor.last_scan_at = timezone.now()
+        cursor.last_success_at = timezone.now()
+        cursor.last_error = None
+        cursor.save(update_fields=["cursor_hash", "status", "last_scan_at", "last_success_at", "last_error", "updated_at"])
+        scanned_recipients += 1
     spl = discover_solana_spl()
-    return {"chain": chain, "status": "healthy", "created": created + spl.get("created", 0), "spl": spl}
+    return {"chain": chain, "status": "healthy", "created": created + spl.get("created", 0), "nativeRecipients": scanned_recipients, "spl": spl}
 
 
 def _spl_cursor(asset, token_account):

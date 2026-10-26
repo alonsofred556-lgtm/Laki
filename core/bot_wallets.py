@@ -23,6 +23,18 @@ _BOT_TRANSFER_TRANSITIONS = {
 }
 
 
+def chain_accessible(identity, chain):
+    """An authenticated wallet may control its chain and the EVM sibling chains.
+
+    EVM addresses are chain-independent, but a Solana identity must never be
+    treated as an EVM signer (or vice versa). The actual transaction still
+    requires the provider/signer to use the selected target chain.
+    """
+    chain = str(chain or "")
+    identity_chain = getattr(identity, "chain", "")
+    return chain == identity_chain or (chain in EVM_BOT_CHAINS and identity_chain in EVM_BOT_CHAINS)
+
+
 def ensure_provision_request(wallet):
     """Ensure every unprovisioned bot wallet has one durable signer request."""
     request, _ = BotWalletProvisionRequest.objects.get_or_create(bot_wallet=wallet)
@@ -142,6 +154,9 @@ def _bot_balance(wallet, asset=None):
 
 
 def bot_wallet_summary(identity):
+    # Keep the read endpoint self-healing for sessions created before the
+    # five-chain provisioning behavior was introduced.
+    ensure_bot_wallets(identity, mode="external-bot")
     wallets = BotWallet.objects.filter(owner=identity).order_by("chain", "mode")
     executions = Execution.objects.filter(user_identity=identity).order_by("-created_at")
     realized = sum((item.realized_profit_usd or Decimal("0") for item in executions if item.state == "settled"), Decimal("0"))
@@ -171,9 +186,11 @@ def bot_wallet_summary(identity):
 
 @transaction.atomic
 def create_bot_transfer(*, identity, wallet_id, direction, asset, amount_base_units, destination, idempotency_key):
-    wallet = BotWallet.objects.select_for_update().filter(id=wallet_id, owner=identity, chain=identity.chain).first()
+    wallet = BotWallet.objects.select_for_update().filter(id=wallet_id, owner=identity).first()
     if not wallet:
         raise ValueError("bot wallet not found")
+    if not chain_accessible(identity, wallet.chain):
+        raise ValueError("authenticated wallet cannot control this bot wallet chain")
     if wallet.status != "active" or not wallet.address:
         raise ValueError("bot wallet is awaiting audited signer provisioning")
     if direction not in {"topup", "withdrawal"}:
