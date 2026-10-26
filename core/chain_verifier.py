@@ -8,6 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from .funding import credit_confirmed_deposit
+from .assets import native_asset, token_config
 from .models import DepositObservation
 
 
@@ -17,6 +18,9 @@ class ProviderError(Exception):
 
 class VerificationError(Exception):
     pass
+
+
+TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a8df523b3ef"
 
 
 def _rpc(url, method, params):
@@ -99,6 +103,8 @@ def _verify_evm(observation):
     actual_chain_id = _rpc(url, "eth_chainId", [])
     if not expected_chain_id or str(actual_chain_id).lower() != str(expected_chain_id).lower():
         raise ProviderError(f"RPC chain identity is not configured for {observation.chain}")
+    if getattr(observation, "asset", native_asset(observation.chain)) != native_asset(observation.chain):
+        return _verify_evm_token(observation, url)
     transaction_data = _rpc(url, "eth_getTransactionByHash", [observation.tx_hash])
     if not transaction_data:
         return "pending"
@@ -119,6 +125,41 @@ def _verify_evm(observation):
     latest = _hex_int(_rpc(url, "eth_blockNumber", []))
     confirmations = max(0, latest - block_number + 1)
     raw = {"from": sender, "to": destination, "value": transaction_data.get("value"), "receiptStatus": receipt.get("status")}
+    if confirmations < settings.CONI_DEPOSIT_CONFIRMATIONS:
+        _pending(observation, confirmations, raw)
+        return "pending"
+    _confirm_and_credit(observation, confirmations, block_number, receipt.get("blockHash"), raw)
+    return "credited"
+
+
+def _verify_evm_token(observation, url):
+    config = token_config(observation.asset, observation.chain) or {}
+    token_address = str(config.get("address", ""))
+    if not token_address:
+        raise VerificationError("token is not configured for this chain")
+    receipt = _rpc(url, "eth_getTransactionReceipt", [observation.tx_hash])
+    if not receipt:
+        return "pending"
+    if receipt.get("status") != "0x1":
+        raise VerificationError("transaction reverted")
+    matching = None
+    for log in receipt.get("logs") or []:
+        topics = log.get("topics") or []
+        if len(topics) < 3 or str(log.get("address", "")).lower() != token_address.lower() or topics[0].lower() != TRANSFER_TOPIC:
+            continue
+        sender = "0x" + topics[1][-40:]
+        destination = "0x" + topics[2][-40:]
+        index = _hex_int(log.get("logIndex", "0x0"))
+        amount = int(log.get("data", "0x0"), 16)
+        if index == observation.event_index and sender.lower() == observation.sender.lower() and destination.lower() == observation.destination.lower() and amount == int(observation.amount_base_units):
+            matching = log
+            break
+    if matching is None:
+        raise VerificationError("token transfer does not match deposit observation")
+    block_number = _hex_int(receipt.get("blockNumber"))
+    latest = _hex_int(_rpc(url, "eth_blockNumber", []))
+    confirmations = max(0, latest - block_number + 1)
+    raw = {"token": token_address, "from": observation.sender, "to": observation.destination, "value": str(observation.amount_base_units), "logIndex": observation.event_index, "receiptStatus": receipt.get("status")}
     if confirmations < settings.CONI_DEPOSIT_CONFIRMATIONS:
         _pending(observation, confirmations, raw)
         return "pending"

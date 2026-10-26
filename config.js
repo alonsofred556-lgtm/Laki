@@ -4,6 +4,7 @@ window.CONI_CONFIG = {
   apiBaseUrl: window.location.hostname === "laki-production.up.railway.app" ? window.location.origin : "",
   pangeaPoolsUrl: "https://www.pangea.trade/api/pools",
   marketDataUrl: "/api/market/pools",
+  tokenRegistryUrl: "/api/market/tokens",
   tokenMetadataUrl: "/api/market/token-meta",
   marketHistoryUrl: "/api/market/history",
   bridgeActivityUrl: "/api/market/bridge-activity",

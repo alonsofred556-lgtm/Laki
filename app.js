@@ -116,14 +116,19 @@
 
   async function load() {
     try {
-      const response = await fetch(config.marketDataUrl || config.pangeaPoolsUrl, { headers: { Accept: "application/json" } });
+      const [response, registryResponse] = await Promise.all([
+        fetch(config.marketDataUrl || config.pangeaPoolsUrl, { headers: { Accept: "application/json" } }),
+        fetch(config.tokenRegistryUrl, { headers: { Accept: "application/json" } })
+      ]);
       if (!response.ok) throw new Error(`Pangea responded ${response.status}`);
       const data = await response.json();
       if (!Array.isArray(data.launches)) throw new Error("Unexpected Pangea payload");
       const selected = data.launches.filter((launch) => launch && launch.slug);
       if (selected.length) {
+        const registry = registryResponse.ok ? await registryResponse.json() : { tokens: [] };
+        const bySlug = new Map((registry.tokens || []).map((item) => [item.slug, item]));
         await loadMetadata(selected);
-        state.data = { ...data, launches: selected.map((launch) => ({ ...launch, image: launch.image || state.metadata.get(launch.slug)?.image })) };
+        state.data = { ...data, launches: selected.map((launch) => ({ ...launch, ...(bySlug.get(launch.slug) || {}), image: launch.image || bySlug.get(launch.slug)?.image || state.metadata.get(launch.slug)?.image })) };
         state.live = true;
       }
     } catch (error) {

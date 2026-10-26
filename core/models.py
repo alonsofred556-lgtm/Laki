@@ -103,6 +103,60 @@ class DepositObservation(models.Model):
         ]
 
 
+class ChainCursor(models.Model):
+    """Durable cursor for a single chain scanner; never advance on a failed batch."""
+
+    key = models.CharField(max_length=64, primary_key=True)
+    chain = models.CharField(max_length=32)
+    cursor_number = models.BigIntegerField(null=True, blank=True)
+    cursor_hash = models.CharField(max_length=160, null=True, blank=True)
+    status = models.CharField(max_length=32, default="never-run")
+    last_scan_at = models.DateTimeField(null=True, blank=True)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=255, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "chain_cursors"
+        indexes = [models.Index(fields=["chain", "status"], name="cursor_chain_status")]
+
+
+class AuditEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    action = models.CharField(max_length=96)
+    actor_type = models.CharField(max_length=32, default="system")
+    actor_id = models.CharField(max_length=128, null=True, blank=True)
+    subject_type = models.CharField(max_length=64, null=True, blank=True)
+    subject_id = models.CharField(max_length=128, null=True, blank=True)
+    result = models.CharField(max_length=32, default="success")
+    request_id = models.CharField(max_length=128, null=True, blank=True)
+    metadata = models.JSONField(default=dict)
+    metadata_hash = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "audit_events"
+        indexes = [
+            models.Index(fields=["action", "created_at"], name="audit_action_created"),
+            models.Index(fields=["subject_type", "subject_id"], name="audit_subject"),
+        ]
+
+
+class ReconciliationRun(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    worker = models.CharField(max_length=64, default="ledger-reconciler")
+    status = models.CharField(max_length=32, default="running")
+    checked_count = models.PositiveIntegerField(default=0)
+    anomaly_count = models.PositiveIntegerField(default=0)
+    details = models.JSONField(default=dict)
+    started_at = models.DateTimeField(auto_now_add=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "reconciliation_runs"
+        indexes = [models.Index(fields=["status", "started_at"], name="recon_status_started")]
+
+
 class WithdrawalRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     idempotency_key = models.CharField(max_length=128, unique=True)

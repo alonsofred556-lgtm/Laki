@@ -4,11 +4,13 @@ from . import views
 
 urlpatterns = [
     path("health", views.health),
+    path("ops/health", views.operations_health),
     path("auth/challenge", views.auth_challenge),
     path("auth/verify", views.auth_verify),
     path("auth/session", views.auth_session),
     path("auth/logout", views.auth_logout),
     path("market/pools", views.market_pools),
+    path("market/tokens", views.market_tokens),
     path("market/token-meta", views.market_meta),
     path("market/history", views.market_history),
     path("market/bridge-activity", views.bridge_activity),

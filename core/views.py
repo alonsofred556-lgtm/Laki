@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 import base58
 from django.conf import settings
 from django.db import IntegrityError, connection, transaction
+from django.db.models import Count
 from django.http import FileResponse, HttpRequest, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -18,9 +19,12 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
 from .layerzero import route_summary
+from .assets import asset_decimals, native_asset, recipient_for, supported_asset
+from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
-from .models import BotControl, DepositObservation, Execution, FeeEvent, FundingIntent, WalletChallenge, WalletIdentity, WithdrawalRequest
-from .pangea import PangeaError, request_json, scan_opportunities
+from .models import AuditEvent, BotControl, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
+from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
+from .rate_limit import RateLimitUnavailable, allow as redis_allow
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 CHAINS = EVM_CHAINS | {"solana"}
@@ -71,6 +75,22 @@ def ops_allowed(request):
     return bool(configured and secrets.compare_digest(request.headers.get("X-Coni-Ops-Token", ""), configured))
 
 
+def request_id(request):
+    value = request.headers.get("X-Request-ID", "")
+    return value[:128] if re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", value) else None
+
+
+def rate_limited(request, bucket, limit=10, window=60):
+    key = request.META.get("REMOTE_ADDR", "unknown")
+    try:
+        allowed, remaining = redis_allow(bucket, key, limit, window)
+    except RateLimitUnavailable:
+        return error("security rate limiting is temporarily unavailable", 503, request)
+    if not allowed:
+        return error("too many requests", 429, request, {"Retry-After": str(window), "X-RateLimit-Remaining": "0"})
+    return None
+
+
 def wallet_address_valid(chain, address):
     if not isinstance(address, str):
         return False
@@ -119,13 +139,18 @@ def parse_json_setting(value):
 
 
 def execution_ready():
-    return settings.CONI_EXECUTION_MODE == "live" and bool(settings.CONI_SIGNER_URL) and settings.CONI_LIVE_TRADING_CONFIRMATION == "I_UNDERSTAND_LIVE_RISK"
+    return (
+        settings.CONI_EXECUTION_MODE == "live"
+        and bool(settings.CONI_SIGNER_URL)
+        and settings.CONI_LIVE_TRADING_CONFIRMATION == "I_UNDERSTAND_LIVE_RISK"
+        and settings.CONI_SIGNER_AUDIT_APPROVED
+    )
 
 
 def bot_status():
     control, _ = BotControl.objects.get_or_create(scope="global")
     recipients = parse_json_setting(settings.CONI_FEE_RECIPIENTS)
-    return {"mode": settings.CONI_EXECUTION_MODE, "executionReady": execution_ready(), "database": True, "enabled": control.enabled, "paused": control.paused, "minNetBps": control.min_net_bps, "maxNotionalUsd": float(control.max_notional_usd), "signerConfigured": bool(settings.CONI_SIGNER_URL), "feeConfigConfigured": bool(recipients)}
+    return {"mode": settings.CONI_EXECUTION_MODE, "executionReady": execution_ready(), "database": True, "enabled": control.enabled, "paused": control.paused, "minNetBps": control.min_net_bps, "maxNotionalUsd": float(control.max_notional_usd), "signerConfigured": bool(settings.CONI_SIGNER_URL), "signerAuditApproved": settings.CONI_SIGNER_AUDIT_APPROVED, "feeConfigConfigured": bool(recipients)}
 
 
 def health(request):
@@ -136,13 +161,45 @@ def health(request):
             database = cursor.fetchone()[0] == 1
     except Exception:
         pass
-    return api_response({"ok": True, "service": "coni-django", "database": database, "time": timezone.now().isoformat()}, 200, request)
+    redis_ok = False
+    redis_required = settings.CONI_REDIS_REQUIRED
+    try:
+        if settings.CONI_REDIS_URL:
+            from .rate_limit import _client
+            redis_ok = bool(_client().ping())
+        else:
+            redis_ok = not redis_required
+    except Exception:
+        redis_ok = False
+    return api_response({"ok": database and (redis_ok or not redis_required), "service": "coni-django", "database": database, "redis": redis_ok, "redisRequired": redis_required, "time": timezone.now().isoformat()}, 200, request)
+
+
+def operations_health(request):
+    if not ops_allowed(request):
+        return error("operations authorization required", 403, request)
+    cursors = list(ChainCursor.objects.values("key", "chain", "cursor_number", "status", "last_success_at", "last_error"))
+    latest = ReconciliationRun.objects.order_by("-started_at").first()
+    counts = {}
+    for row in DepositObservation.objects.values("status").annotate(total=Count("id")):
+        counts[row["status"]] = row["total"]
+    return api_response({
+        "service": "coni-django",
+        "time": timezone.now().isoformat(),
+        "bot": bot_status(),
+        "deposits": counts,
+        "cursors": cursors,
+        "lastReconciliation": {"id": str(latest.id), "status": latest.status, "checked": latest.checked_count, "anomalies": latest.anomaly_count, "finishedAt": latest.finished_at.isoformat() if latest.finished_at else None} if latest else None,
+        "lastAuditAt": AuditEvent.objects.order_by("-created_at").values_list("created_at", flat=True).first(),
+    }, 200, request)
 
 
 @csrf_exempt
 def auth_challenge(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "auth-challenge", 10, 60)
+    if limited:
+        return limited
     try:
         data = body(request)
         chain, address = data.get("chain"), data.get("address")
@@ -176,6 +233,9 @@ def verify_signature(challenge, signature):
 def auth_verify(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "auth-verify", 10, 60)
+    if limited:
+        return limited
     try:
         data = body(request)
         challenge = WalletChallenge.objects.filter(id=data.get("challengeId"), consumed_at__isnull=True, expires_at__gt=timezone.now()).first()
@@ -193,6 +253,7 @@ def auth_verify(request):
         request.session["wallet_identity_id"] = str(identity.id)
         request.session["wallet_chain"] = identity.chain
         request.session["wallet_address"] = identity.address
+        record_event("wallet.authenticate", actor_type="wallet", actor_id=identity.id, subject_type="wallet", subject_id=identity.id, request_id=request_id(request), metadata={"chain": identity.chain})
         return api_response({"authenticated": True, "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address}}, 200, request)
     except Exception as exc:
         return error("wallet signature verification failed", 401, request) if not settings.DEBUG else error(str(exc), 400, request)
@@ -220,6 +281,13 @@ def pangea_proxy(request, path, query=None, method="GET"):
 
 def market_pools(request):
     return pangea_proxy(request, "/pools")
+
+
+def market_tokens(request):
+    try:
+        return api_response({"readAt": timezone.now().isoformat(), "tokens": token_registry_snapshot()}, 200, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
 
 
 def market_meta(request):
@@ -279,21 +347,25 @@ def quote_proxy(request, kind):
 def funding_intent(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "funding-intent", 10, 60)
+    if limited:
+        return limited
     try:
         identity = require_session(request)
         data = body(request)
         asset, amount, wallet = str(data.get("asset", "")).upper(), str(data.get("amount", "")), data.get("wallet")
-        if asset not in ASSET_DECIMALS or not wallet_address_valid(identity.chain, wallet) or wallet.lower() != identity.address.lower():
+        decimals = asset_decimals(asset, identity.chain)
+        if not supported_asset(asset, identity.chain) or decimals is None or not wallet_address_valid(identity.chain, wallet) or wallet.lower() != identity.address.lower():
             return error("invalid funding request", 400, request)
-        if asset == "SOL" and identity.chain != "solana" or asset == "BNB" and identity.chain != "bsc" or asset == "ETH" and identity.chain == "bsc":
+        if ((asset in ASSET_DECIMALS and asset != native_asset(identity.chain)) or (asset not in ASSET_DECIMALS and not supported_asset(asset, identity.chain))):
             return error("funding asset does not match connected chain", 400, request)
-        amount_base = decimal_units(amount, ASSET_DECIMALS[asset])
-        recipients = parse_json_setting(settings.CONI_FUNDING_RECIPIENTS)
-        destination = recipients.get(asset)
+        amount_base = decimal_units(amount, decimals)
+        destination = recipient_for(asset, identity.chain)
         if not amount_base or not wallet_address_valid(identity.chain, destination):
             return error("funding destination or amount is not configured", 503, request)
         expires = timezone.now() + timedelta(minutes=5)
         intent = FundingIntent.objects.create(wallet_identity=identity, asset=asset, chain=identity.chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
+        record_event("funding.intent.created", actor_type="wallet", actor_id=identity.id, subject_type="funding_intent", subject_id=intent.id, request_id=request_id(request), metadata={"asset": asset, "chain": identity.chain, "amountBaseUnits": amount_base})
         return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": identity.chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "expiresAt": expires.isoformat()}, 201, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
@@ -305,6 +377,9 @@ def funding_intent(request):
 def funding_claim(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "funding-claim", 20, 60)
+    if limited:
+        return limited
     try:
         identity = require_session(request)
         data = body(request)
@@ -340,10 +415,17 @@ def funding_claim(request):
             },
         )
         if observation.wallet_identity_id != identity.id:
-            return error("transaction is already claimed by another wallet", 409, request)
+            if observation.wallet_identity_id is not None or observation.asset != intent.asset or observation.chain != intent.chain or observation.destination.lower() != intent.destination.lower() or observation.sender.lower() != identity.address.lower() or int(observation.amount_base_units) != int(intent.amount_base_units):
+                return error("transaction is already claimed by another wallet or does not match the intent", 409, request)
+            observation.wallet_identity = identity
+            observation.funding_intent = intent
+            observation.status = "pending-verification"
+            observation.rejection_code = None
+            observation.save(update_fields=["wallet_identity", "funding_intent", "status", "rejection_code"])
         if created and intent.status == "awaiting-wallet-approval":
             intent.status = "pending-verification"
             intent.save(update_fields=["status"])
+        record_event("funding.claim.submitted", actor_type="wallet", actor_id=identity.id, subject_type="deposit_observation", subject_id=observation.id, request_id=request_id(request), metadata={"chain": observation.chain, "asset": observation.asset, "txHash": observation.tx_hash, "eventIndex": observation.event_index})
         return api_response({
             "observationId": str(observation.id),
             "intentId": str(intent.id),
@@ -390,6 +472,9 @@ def funding_status(request, intent_id):
 def withdrawal_request(request):
     if request.method != "POST" or not post_allowed(request):
         return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    limited = rate_limited(request, "withdrawal-request", 10, 60)
+    if limited:
+        return limited
     try:
         identity = require_session(request)
         data = body(request)
@@ -397,11 +482,12 @@ def withdrawal_request(request):
         amount = str(data.get("amount", ""))
         destination = data.get("destination")
         idempotency_key = str(data.get("idempotencyKey", ""))
-        if asset not in ASSET_DECIMALS or not wallet_address_valid(identity.chain, destination) or not IDEMPOTENCY_RE.fullmatch(idempotency_key):
+        decimals = asset_decimals(asset, identity.chain)
+        if not supported_asset(asset, identity.chain) or decimals is None or not wallet_address_valid(identity.chain, destination) or not IDEMPOTENCY_RE.fullmatch(idempotency_key):
             return error("invalid withdrawal request", 400, request)
-        if asset == "SOL" and identity.chain != "solana" or asset == "BNB" and identity.chain != "bsc" or asset == "ETH" and identity.chain == "bsc":
+        if ((asset in ASSET_DECIMALS and asset != native_asset(identity.chain)) or (asset not in ASSET_DECIMALS and not supported_asset(asset, identity.chain))):
             return error("withdrawal asset does not match connected chain", 400, request)
-        amount_base = decimal_units(amount, ASSET_DECIMALS[asset])
+        amount_base = decimal_units(amount, decimals)
         if not amount_base:
             return error("invalid withdrawal amount", 400, request)
         existing = WithdrawalRequest.objects.filter(idempotency_key=idempotency_key).first()
@@ -422,6 +508,7 @@ def withdrawal_request(request):
                 expires_at=timezone.now() + timedelta(minutes=15),
             )
             reserve_withdrawal(withdrawal.id)
+        record_event("withdrawal.requested", actor_type="wallet", actor_id=identity.id, subject_type="withdrawal", subject_id=withdrawal.id, request_id=request_id(request), metadata={"asset": asset, "chain": identity.chain, "amountBaseUnits": amount_base, "destination": destination})
         return api_response({
             "withdrawalId": str(withdrawal.id),
             "state": withdrawal.status,

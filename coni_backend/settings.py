@@ -112,17 +112,24 @@ CONI_OPS_TOKEN = os.environ.get("CONI_OPS_TOKEN", "")
 CONI_EXECUTION_MODE = os.environ.get("CONI_EXECUTION_MODE", "disabled")
 CONI_SIGNER_URL = os.environ.get("CONI_SIGNER_URL", "")
 CONI_LIVE_TRADING_CONFIRMATION = os.environ.get("CONI_LIVE_TRADING_CONFIRMATION", "")
+CONI_SIGNER_AUDIT_APPROVED = os.environ.get("CONI_SIGNER_AUDIT_APPROVED", "false").lower() == "true"
 CONI_DEFAULT_COST_BUFFER_BPS = int(os.environ.get("CONI_DEFAULT_COST_BUFFER_BPS", "55"))
 CONI_TRADING_FEE_BPS = int(os.environ.get("CONI_TRADING_FEE_BPS", "25"))
 CONI_BOT_FUNDING_FEE_BPS = int(os.environ.get("CONI_BOT_FUNDING_FEE_BPS", "0"))
 CONI_FUNDING_RECIPIENTS = os.environ.get("CONI_FUNDING_RECIPIENTS", "{}")
+CONI_DEPOSIT_RECIPIENTS = os.environ.get("CONI_DEPOSIT_RECIPIENTS", "{}")
 CONI_FEE_RECIPIENTS = os.environ.get("CONI_FEE_RECIPIENTS", "{}")
+CONI_TOKEN_REGISTRY = os.environ.get("CONI_TOKEN_REGISTRY", "{}")
 CONI_RPC_URLS = os.environ.get("CONI_RPC_URLS", "{}")
 CONI_EXPECTED_CHAIN_IDS = os.environ.get("CONI_EXPECTED_CHAIN_IDS", "{}")
 CONI_SOLANA_RPC_URL = os.environ.get("CONI_SOLANA_RPC_URL", "")
 CONI_DEPOSIT_CONFIRMATIONS = int(os.environ.get("CONI_DEPOSIT_CONFIRMATIONS", "12"))
 CONI_DEPOSIT_MAX_AGE_MINUTES = int(os.environ.get("CONI_DEPOSIT_MAX_AGE_MINUTES", "1440"))
 CONI_DEPOSIT_SCAN_BATCH = int(os.environ.get("CONI_DEPOSIT_SCAN_BATCH", "50"))
+CONI_DEPOSIT_SCAN_LOOKBACK_BLOCKS = int(os.environ.get("CONI_DEPOSIT_SCAN_LOOKBACK_BLOCKS", "2000"))
+CONI_REDIS_URL = os.environ.get("CONI_REDIS_URL", "")
+CONI_REDIS_REQUIRED = os.environ.get("CONI_REDIS_REQUIRED", "true" if not DEBUG else "false").lower() == "true"
+CONI_AUDIT_HASH_KEY = os.environ.get("CONI_AUDIT_HASH_KEY", "")
 
 PANGEA_API = "https://www.pangea.trade/api"
 LAYERZERO_ENDPOINT_IDS = {"ethereum": 30101, "base": 30184, "robinhood": 30416, "bsc": 30102, "solana": 30168}

@@ -36,6 +36,10 @@ Create a Railway service from this repository and a managed PostgreSQL service. 
 - Native balance reads and a funding-intent boundary that refuses arbitrary destinations.
 - Non-custodial funding claim and verification workflow with idempotent deposit observations, finality checks, and double-entry ledger crediting.
 - Withdrawal request and balance-reservation workflow that remains signer- and broadcast-gated.
+- Automatic native and configured ERC-20/SOL transfer discovery with unclaimed-deposit handling and durable chain cursors.
+- Normalized Pangea token registry with per-chain addresses, tickers, metadata, and logo URLs.
+- Redis fail-closed rate limiting, append-only audit events, and a ledger reconciliation worker.
+- A separate signer policy service skeleton that requires an audited HSM/MPC adapter and rejects arbitrary calldata.
 - Coni-branded logo and wordmark assets reused from the supplied theme.
 - Responsive website shell and compact extension popup.
 - No seed phrases or private keys are exposed. Deposits, withdrawals, bridge transactions, and automatic trading remain disabled until the audited signer/treasury boundary is supplied.
