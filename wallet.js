@@ -181,6 +181,7 @@
       saveConnections();
       renderConnections();
       message(`${state.evm.chainName} wallet connected.`, "success");
+      loadBotWallet();
       provider.on?.("accountsChanged", () => connectEvm());
       provider.on?.("chainChanged", () => connectEvm());
     } catch (error) {
@@ -216,6 +217,7 @@
       saveConnections();
       renderConnections();
       message("Solana wallet connected.", "success");
+      loadBotWallet();
       provider.on?.("accountChanged", (publicKey) => { if (publicKey) { state.solana.address = publicKey.toString(); renderConnections(); } });
     } catch (error) {
       message(error?.message || "The Solana wallet connection was cancelled.", "error");
@@ -505,6 +507,9 @@
   renderConnections();
   loadTokenLogo();
   loadBotWallet();
+  window.setInterval(() => {
+    if (state.evm?.authenticated || state.solana?.authenticated) loadBotWallet();
+  }, 15000);
   const requestedConnect = new URLSearchParams(window.location.search).get("connect");
   if (requestedConnect === "evm" || requestedConnect === "solana") {
     window.setTimeout(() => (requestedConnect === "evm" ? connectEvm() : connectSolana()), 0);
