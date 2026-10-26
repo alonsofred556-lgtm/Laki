@@ -81,6 +81,19 @@ def next_bot_transfer_state(current, event):
         raise ValueError(f"invalid bot transfer transition {current}->{event}") from exc
 
 
+def bot_transfer_chain(wallet):
+    """Return the chain that owns a bot transfer.
+
+    The selected bot wallet, not the chain used to authenticate the external
+    wallet, is authoritative. This matters when one EVM identity controls a
+    bot wallet on a different EVM network.
+    """
+    chain = str(getattr(wallet, "chain", ""))
+    if not chain:
+        raise ValueError("bot wallet chain is required")
+    return chain
+
+
 def ensure_bot_wallet(identity, *, mode="external-bot"):
     """Create the durable per-user bot-wallet record without inventing an address.
 
@@ -221,7 +234,7 @@ def create_bot_transfer(*, identity, wallet_id, direction, asset, amount_base_un
             "owner": identity,
             "direction": direction,
             "asset": asset,
-            "chain": identity.chain,
+            "chain": bot_transfer_chain(wallet),
             "amount_base_units": amount_base_units,
             "destination": destination,
             "state": "pending-approval",

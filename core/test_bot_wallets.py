@@ -8,10 +8,18 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .bot_wallets import chain_accessible
+from .bot_wallets import bot_transfer_chain, chain_accessible
 
 
 class BotWalletAccessTests(SimpleTestCase):
+    def test_transfer_uses_selected_bot_wallet_chain(self):
+        wallet = SimpleNamespace(chain="robinhood")
+        self.assertEqual(bot_transfer_chain(wallet), "robinhood")
+
+    def test_transfer_requires_a_bot_wallet_chain(self):
+        with self.assertRaises(ValueError):
+            bot_transfer_chain(SimpleNamespace(chain=""))
+
     def test_evm_identity_can_select_each_evm_bot_network(self):
         identity = SimpleNamespace(chain="base")
         for chain in ("ethereum", "base", "robinhood", "bsc"):
