@@ -483,6 +483,9 @@ def signer_profit_settlement_event(request):
 
 
 def pangea_proxy(request, path, query=None, method="GET"):
+    limited = rate_limited(request, f"pangea:{method}:{path}", 60 if method == "GET" else 20, 60)
+    if limited:
+        return limited
     try:
         return api_response(request_json(path + (("?" + query) if query else ""), method=method, payload=body(request) if method == "POST" else None), 200, request)
     except (PangeaError, ValueError, json.JSONDecodeError) as exc:
@@ -494,6 +497,9 @@ def market_pools(request):
 
 
 def market_tokens(request):
+    limited = rate_limited(request, "pangea:market-tokens", 60, 60)
+    if limited:
+        return limited
     try:
         return api_response({"readAt": timezone.now().isoformat(), "tokens": token_registry_snapshot()}, 200, request)
     except PangeaError as exc:
@@ -501,6 +507,9 @@ def market_tokens(request):
 
 
 def market_meta(request):
+    limited = rate_limited(request, "pangea:token-meta", 60, 60)
+    if limited:
+        return limited
     launch = request.GET.get("launch", "")
     if not SLUG_RE.fullmatch(launch):
         return error("invalid launch", 400, request)

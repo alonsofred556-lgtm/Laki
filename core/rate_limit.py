@@ -1,4 +1,4 @@
-"""Redis-only rate limiting for security-sensitive API paths."""
+"""Redis-only rate limiting for security-sensitive and upstream proxy paths."""
 
 from functools import lru_cache
 
