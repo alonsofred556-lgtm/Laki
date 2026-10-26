@@ -13,6 +13,7 @@ urlpatterns = [
     path("bot-wallet/provision", views.bot_wallet_provision),
     path("bot-wallet/transfer", views.bot_wallet_transfer),
     path("internal/signer/bot-wallet-attest", views.signer_bot_wallet_attest),
+    path("internal/signer/bot-wallet-provision-requests", views.signer_bot_wallet_provision_requests),
     path("internal/signer/bot-transfer-event", views.signer_bot_transfer_event),
     path("internal/signer/profit-settlement-event", views.signer_profit_settlement_event),
     path("market/pools", views.market_pools),

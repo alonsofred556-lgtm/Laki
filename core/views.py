@@ -25,8 +25,8 @@ from .layerzero import route_summary
 from .assets import asset_decimals, native_asset, recipient_for, supported_asset
 from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
-from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
-from .bot_wallets import bot_wallet_payload, bot_wallet_summary, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
+from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletProvisionRequest, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
+from .bot_wallets import bot_wallet_payload, bot_wallet_summary, claim_provision_requests, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
 from .execution import create_execution_from_opportunity, execution_payload, record_execution_event, signer_intent_payload
 from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
@@ -370,7 +370,7 @@ def signer_bot_wallet_attest(request):
         return error("signer provisioning authorization required", 403, request)
     try:
         data = body(request)
-        if set(data) - {"botWalletId", "chain", "address", "signerKeyRef", "attestationHash"}:
+        if set(data) - {"provisionRequestId", "botWalletId", "chain", "address", "signerKeyRef", "attestationHash"} or not data.get("provisionRequestId"):
             return error("unexpected signer provisioning fields", 400, request)
         if not data.get("botWalletId") or not isinstance(data.get("chain"), str) or data["chain"] not in CHAINS:
             return error("invalid bot wallet provisioning request", 400, request)
@@ -383,6 +383,11 @@ def signer_bot_wallet_attest(request):
             wallet = BotWallet.objects.select_for_update().filter(id=data["botWalletId"], chain=data["chain"]).first()
             if not wallet:
                 return error("bot wallet not found", 404, request)
+            provision = BotWalletProvisionRequest.objects.select_for_update().filter(id=data["provisionRequestId"], bot_wallet=wallet).first()
+            if not provision or provision.status not in {"pending", "leased", "completed"}:
+                return error("invalid bot wallet provision request", 409, request)
+            if provision.status == "leased" and provision.lease_until and provision.lease_until < timezone.now():
+                return error("bot wallet provision request lease expired", 409, request)
             if wallet.address and wallet.address.lower() != address.lower():
                 return error("bot wallet address rotation requires a new audited record", 409, request)
             wallet.address = address
@@ -390,12 +395,40 @@ def signer_bot_wallet_attest(request):
             wallet.custody = "audited-signer"
             wallet.status = "active"
             wallet.save(update_fields=["address", "signer_key_ref", "custody", "status", "updated_at"])
+            provision.status = "completed"
+            provision.lease_until = None
+            provision.completed_at = timezone.now()
+            provision.save(update_fields=["status", "lease_until", "completed_at", "updated_at"])
         record_event("bot_wallet.attested", actor_type="signer", actor_id=key_ref, subject_type="bot_wallet", subject_id=wallet.id, metadata={"chain": wallet.chain, "attestationHash": attestation})
         return api_response({"wallet": bot_wallet_payload(wallet), "state": "active"}, 200, request)
     except IntegrityError:
         return error("signer address is already bound to another bot wallet", 409, request)
     except (ValueError, json.JSONDecodeError) as exc:
         return error(str(exc), 400, request)
+
+
+@csrf_exempt
+def signer_bot_wallet_provision_requests(request):
+    """Private pull endpoint for the audited signer/MPC provisioning adapter."""
+    if request.method != "GET" or not signer_provision_allowed(request):
+        return error("signer provisioning authorization required", 403, request)
+    try:
+        limit = min(max(int(request.GET.get("limit", "20")), 1), 100)
+    except (TypeError, ValueError):
+        return error("invalid provisioning request limit", 400, request)
+    requests = claim_provision_requests(limit=limit)
+    return api_response({
+        "requests": [{
+            "provisionRequestId": str(item.id),
+            "botWalletId": str(item.bot_wallet_id),
+            "ownerId": str(item.bot_wallet.owner_id),
+            "chain": item.bot_wallet.chain,
+            "mode": item.bot_wallet.mode,
+            "sourceAddress": item.bot_wallet.source_address or None,
+            "attempt": item.attempt_count,
+            "leaseUntil": item.lease_until.isoformat() if item.lease_until else None,
+        } for item in requests]
+    }, 200, request)
 
 
 @csrf_exempt

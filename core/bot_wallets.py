@@ -1,23 +1,63 @@
 """Per-user bot-wallet lifecycle and read-only portfolio summaries."""
 
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
+from django.utils import timezone
 
 from .audit import record_event
 from .assets import asset_decimals, supported_asset
 from .funding import account_for, ledger_balance
-from .models import BotWallet, BotWalletTransfer, BotWalletTransferEvent, Execution, LedgerAccount, LedgerEntry, WalletIdentity
+from .models import BotWallet, BotWalletProvisionRequest, BotWalletTransfer, BotWalletTransferEvent, Execution, LedgerAccount, LedgerEntry, WalletIdentity
 
 
 BOT_WALLET_CHAINS = ("ethereum", "base", "robinhood", "bsc", "solana")
 EVM_BOT_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 BOT_TRANSFER_EVENTS = {"submitted", "confirmed", "failed"}
+PROVISION_LEASE_SECONDS = 120
 _BOT_TRANSFER_TRANSITIONS = {
     "pending-approval": {"submitted": "submitted", "failed": "failed"},
     "submitted": {"confirmed": "confirmed", "failed": "failed"},
 }
+
+
+def ensure_provision_request(wallet):
+    """Ensure every unprovisioned bot wallet has one durable signer request."""
+    request, _ = BotWalletProvisionRequest.objects.get_or_create(bot_wallet=wallet)
+    return request
+
+
+def claim_provision_requests(*, limit=20):
+    """Lease pending wallet requests so a signer can safely retry after a crash."""
+    # Backfill records created before the provisioning queue existed. The
+    # unique one-to-one relation makes this safe when multiple signer polls
+    # arrive at the same time.
+    legacy_wallet_ids = BotWallet.objects.filter(
+        status="awaiting-signer-provision",
+        address="",
+        provision_request__isnull=True,
+    ).values_list("id", flat=True)[:limit]
+    for wallet_id in legacy_wallet_ids:
+        ensure_provision_request(BotWallet.objects.get(id=wallet_id))
+
+    now = timezone.now()
+    lease_until = now + timedelta(seconds=PROVISION_LEASE_SECONDS)
+    claimed = []
+    with transaction.atomic():
+        candidates = BotWalletProvisionRequest.objects.select_for_update().select_related("bot_wallet", "bot_wallet__owner").filter(
+            Q(status="pending") | Q(status="leased", lease_until__lt=now),
+            bot_wallet__status="awaiting-signer-provision",
+            bot_wallet__address="",
+        ).order_by("created_at")[:limit]
+        for request in candidates:
+            request.status = "leased"
+            request.attempt_count += 1
+            request.lease_until = lease_until
+            request.save(update_fields=["status", "attempt_count", "lease_until", "updated_at"])
+            claimed.append(request)
+    return claimed
 
 
 def next_bot_transfer_state(current, event):
@@ -45,6 +85,8 @@ def ensure_bot_wallet(identity, *, mode="external-bot"):
     )
     if created:
         record_event("bot_wallet.created", actor_type="wallet", actor_id=identity.id, subject_type="bot_wallet", subject_id=wallet.id, metadata={"chain": identity.chain, "mode": mode, "status": wallet.status})
+    if wallet.status == "awaiting-signer-provision" and not wallet.address:
+        ensure_provision_request(wallet)
     return wallet
 
 
@@ -68,6 +110,8 @@ def ensure_bot_wallets(identity, *, mode="external-bot"):
             wallet.save(update_fields=["source_address", "updated_at"])
         if created:
             record_event("bot_wallet.created", actor_type="wallet", actor_id=identity.id, subject_type="bot_wallet", subject_id=wallet.id, metadata={"chain": chain, "mode": mode, "status": wallet.status})
+        if wallet.status == "awaiting-signer-provision" and not wallet.address:
+            ensure_provision_request(wallet)
         wallets.append(wallet)
     return wallets
 

@@ -51,6 +51,24 @@ class BotWallet(models.Model):
         indexes = [models.Index(fields=["owner", "status"], name="bot_wallet_owner_status")]
 
 
+class BotWalletProvisionRequest(models.Model):
+    """Durable lease for an audited signer/MPC wallet-provisioning request."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_wallet = models.OneToOneField(BotWallet, on_delete=models.PROTECT, related_name="provision_request")
+    status = models.CharField(max_length=24, default="pending")
+    attempt_count = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    failure_code = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "bot_wallet_provision_requests"
+        indexes = [models.Index(fields=["status", "lease_until"], name="bot_provision_status_lease")]
+
+
 class BotWalletTransfer(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     idempotency_key = models.CharField(max_length=128, unique=True)

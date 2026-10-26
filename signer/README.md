@@ -8,6 +8,13 @@ Pangea artifact, and then submit lifecycle events through the callback
 endpoints. The returned artifact is an input for validation, not permission
 to sign arbitrary calldata.
 
+Before provisioning, poll `/api/internal/signer/bot-wallet-provision-requests`
+with the provisioning HMAC. Each leased request identifies one user-scoped
+bot-wallet record and chain; generate or allocate the address inside the
+audited MPC/HSM system, then call `/api/internal/signer/bot-wallet-attest` with
+the `provisionRequestId`, public address, opaque `signerKeyRef`, and attestation
+hash. Never send a private key to Django.
+
 For bot-wallet top-ups and withdrawals, the adapter may call
 `/api/internal/signer/bot-transfer-event` with only the transfer UUID, a
 strict lifecycle event (`submitted`, `confirmed`, or `failed`), an
