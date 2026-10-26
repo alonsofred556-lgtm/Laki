@@ -27,7 +27,7 @@ from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
 from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
 from .bot_wallets import bot_wallet_payload, bot_wallet_summary, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
-from .execution import create_execution_from_opportunity, execution_payload, record_execution_event
+from .execution import create_execution_from_opportunity, execution_payload, record_execution_event, signer_intent_payload
 from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
 from .profit_settlement import prepare_usdg_settlement, record_usdg_settlement_event
@@ -1019,6 +1019,33 @@ def signer_execution_event(request):
     except Execution.DoesNotExist:
         return error("execution not found", 404, request)
     except (ValueError, TypeError, InvalidOperation, json.JSONDecodeError) as exc:
+        return error(str(exc), 409, request)
+
+
+@csrf_exempt
+def signer_execution_intent(request):
+    """Private signer pull endpoint for one exact, quote-bound execution."""
+    if request.method != "POST" or not signer_event_allowed(request):
+        return error("signer event authorization required", 403, request)
+    try:
+        data = body(request)
+        allowed = {"executionId", "idempotencyKey"}
+        if set(data) - allowed or not data.get("executionId") or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
+            return error("invalid signer intent request", 400, request)
+        execution = Execution.objects.filter(id=data["executionId"]).first()
+        if not execution:
+            return error("execution not found", 404, request)
+        if execution.state == "planned":
+            execution = record_execution_event(
+                execution_id=execution.id,
+                event="signer-requested",
+                idempotency_key=data["idempotencyKey"],
+                metadata={"source": "signer-intent-pull"},
+            )
+        return api_response({"intent": signer_intent_payload(execution)}, 200, request)
+    except Execution.DoesNotExist:
+        return error("execution not found", 404, request)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return error(str(exc), 409, request)
 
 

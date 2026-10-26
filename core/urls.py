@@ -43,4 +43,5 @@ urlpatterns = [
     path("execution/history", views.execution_history),
     path("execution/<uuid:execution_id>", views.execution_detail),
     path("internal/signer/execution-event", views.signer_execution_event),
+    path("internal/signer/execution-intent", views.signer_execution_intent),
 ]

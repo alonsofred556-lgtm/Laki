@@ -2,6 +2,12 @@
 
 This is a separate private service, not a Django view. It validates a short-lived, hashed, structured transaction intent and records the exact digest that an HSM/MPC adapter would sign. It intentionally returns `signer-adapter-required` until an independently audited custody provider is installed.
 
+The private signer should pull `/api/internal/signer/execution-intent` with a
+short-lived HMAC request, independently parse and simulate the returned
+Pangea artifact, and then submit lifecycle events through the callback
+endpoints. The returned artifact is an input for validation, not permission
+to sign arbitrary calldata.
+
 For bot-wallet top-ups and withdrawals, the adapter may call
 `/api/internal/signer/bot-transfer-event` with only the transfer UUID, a
 strict lifecycle event (`submitted`, `confirmed`, or `failed`), an

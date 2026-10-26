@@ -135,6 +135,39 @@ def execution_payload(execution):
     }
 
 
+def signer_intent_payload(execution):
+    """Return the private signer handoff for one hash-bound execution plan."""
+    execution = Execution.objects.select_related("bot_wallet", "opportunity").prefetch_related("legs").get(id=execution.id)
+    if execution.state not in {"planned", "awaiting-signer"}:
+        raise ValueError("execution is not awaiting signer handoff")
+    if not execution.quote_hash or not isinstance(execution.quote_artifact, dict) or not execution.quote_artifact.get("trade") or not execution.quote_artifact.get("bridge"):
+        raise ValueError("execution quote artifact is incomplete")
+    artifact_hash = _quote_hash({"trade": execution.quote_artifact["trade"], "bridge": execution.quote_artifact["bridge"]})
+    if not hmac.compare_digest(str(execution.quote_hash), artifact_hash):
+        raise ValueError("execution quote artifact hash mismatch")
+    return {
+        "executionId": str(execution.id),
+        "slug": execution.slug,
+        "quoteHash": execution.quote_hash,
+        "quoteArtifact": execution.quote_artifact,
+        "expectedProfitUsd": str(execution.expected_profit_usd) if execution.expected_profit_usd is not None else None,
+        "botWallet": {
+            "id": str(execution.bot_wallet_id) if execution.bot_wallet_id else None,
+            "chain": execution.bot_wallet.chain if execution.bot_wallet else None,
+            "address": execution.bot_wallet.address if execution.bot_wallet else None,
+            "signerKeyRef": execution.bot_wallet.signer_key_ref if execution.bot_wallet else None,
+        },
+        "legs": [{
+            "kind": leg.kind,
+            "chain": leg.chain,
+            "quoteHash": leg.quote_hash,
+            "amountInBaseUnits": str(leg.amount_in_base_units),
+            "amountOutBaseUnits": str(leg.amount_out_base_units),
+        } for leg in execution.legs.all()],
+        "expiresAt": execution.opportunity.expires_at.isoformat() if execution.opportunity and execution.opportunity.expires_at else None,
+    }
+
+
 @transaction.atomic
 def create_execution_from_opportunity(*, identity: WalletIdentity, opportunity_id, bot_wallet: BotWallet, decision=None, quote_hash=None):
     """Create one execution plan from one fresh, quote-bound opportunity."""
