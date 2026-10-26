@@ -156,6 +156,20 @@ def bot_wallet_payload(wallet):
     }
 
 
+def select_bot_wallet(wallets, *, chain, mode="external-bot", selected_wallet_id=None):
+    """Choose the requested per-user bot wallet without crossing custody modes."""
+    if selected_wallet_id:
+        selected = next((wallet for wallet in wallets if str(wallet.id) == str(selected_wallet_id)), None)
+        if selected is not None:
+            return selected
+    preferred = next((wallet for wallet in wallets if wallet.chain == chain and wallet.mode == mode), None)
+    if preferred is not None:
+        return preferred
+    # Legacy identities may not yet have the selected mode provisioned. Keep
+    # the read endpoint useful, but make the returned mode explicit to the UI.
+    return next((wallet for wallet in wallets if wallet.chain == chain and wallet.mode == "external-bot"), None)
+
+
 def _bot_balance(wallet, asset=None):
     filters = {"owner": wallet.owner, "bot_wallet": wallet, "chain": wallet.chain, "kind": "bot-available"}
     if asset:
@@ -176,9 +190,7 @@ def bot_wallet_summary(identity, selected_wallet_id=None):
     executions = Execution.objects.filter(user_identity=identity).order_by("-created_at")
     realized = sum((item.realized_profit_usd or Decimal("0") for item in executions if item.state == "settled"), Decimal("0"))
     expected = sum((item.expected_profit_usd or Decimal("0") for item in executions), Decimal("0"))
-    selected = next((wallet for wallet in wallets if selected_wallet_id and str(wallet.id) == str(selected_wallet_id)), None)
-    if selected is None:
-        selected = next((wallet for wallet in wallets if wallet.chain == identity.chain and wallet.mode == "external-bot"), None)
+    selected = select_bot_wallet(wallets, chain=identity.chain, mode=user_control.wallet_mode, selected_wallet_id=selected_wallet_id)
     selected_executions = executions.filter(bot_wallet=selected) if selected else executions.none()
     selected_realized = sum((item.realized_profit_usd or Decimal("0") for item in selected_executions if item.state == "settled"), Decimal("0"))
     selected_expected = sum((item.expected_profit_usd or Decimal("0") for item in selected_executions), Decimal("0"))
@@ -197,7 +209,7 @@ def bot_wallet_summary(identity, selected_wallet_id=None):
             {**bot_wallet_payload(wallet), "balances": _bot_balance(wallet)}
             for wallet in wallets
         ]
-    current = next((item for item in payload_wallets if item["chain"] == identity.chain and item["mode"] == "external-bot"), None)
+    current = next((item for item in payload_wallets if selected and item["id"] == str(selected.id)), None)
     return {
         "currentChain": identity.chain,
         "botControl": {

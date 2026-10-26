@@ -8,10 +8,21 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .bot_wallets import bot_transfer_chain, chain_accessible
+from .bot_wallets import bot_transfer_chain, chain_accessible, select_bot_wallet
 
 
 class BotWalletAccessTests(SimpleTestCase):
+    def test_summary_prefers_persisted_internal_mode(self):
+        wallets = [
+            SimpleNamespace(id="external", chain="base", mode="external-bot"),
+            SimpleNamespace(id="internal", chain="base", mode="internal-bot"),
+        ]
+        self.assertEqual(select_bot_wallet(wallets, chain="base", mode="internal-bot").id, "internal")
+
+    def test_summary_falls_back_explicitly_when_mode_is_not_provisioned(self):
+        wallets = [SimpleNamespace(id="external", chain="base", mode="external-bot")]
+        self.assertEqual(select_bot_wallet(wallets, chain="base", mode="internal-bot").mode, "external-bot")
+
     def test_transfer_uses_selected_bot_wallet_chain(self):
         wallet = SimpleNamespace(chain="robinhood")
         self.assertEqual(bot_transfer_chain(wallet), "robinhood")
