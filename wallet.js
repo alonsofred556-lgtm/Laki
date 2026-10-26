@@ -308,7 +308,7 @@
     loadBotWallet();
   }
 
-  async function encryptLocalSecret(secret, password) {
+  async function encryptLocalSecret(secret, password, chain) {
     const encoder = new TextEncoder();
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -316,21 +316,31 @@
     const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
     const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(secret));
     const encode = (bytes) => btoa(String.fromCharCode(...bytes));
-    return { version: 1, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
+    return { version: 1, chain, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
+  }
+
+  function validLocalSecret(chain, secret) {
+    if (chain === "evm") return /^0x[a-fA-F0-9]{64}$/.test(secret);
+    if (/^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(secret)) return true;
+    try {
+      const parsed = JSON.parse(secret);
+      return Array.isArray(parsed) && parsed.length === 64 && parsed.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
+    } catch { return false; }
   }
 
   async function importLocalWallet() {
+    const chain = $("#existing-wallet-chain").value;
     const privateKey = $("#existing-private-key").value.trim();
     const password = $("#existing-wallet-password").value;
-    if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey) || password.length < 12) {
-      $("#vault-action-status").textContent = "Enter a valid EVM private key and a password of at least 12 characters. The key remains in this browser and is never posted.";
+    if (!validLocalSecret(chain, privateKey) || password.length < 12) {
+      $("#vault-action-status").textContent = chain === "solana" ? "Enter a valid Solana base58 secret or 64-byte JSON array and a password of at least 12 characters. The secret remains in this browser and is never posted." : "Enter a valid EVM private key and a password of at least 12 characters. The key remains in this browser and is never posted.";
       return;
     }
-    const vault = await encryptLocalSecret(privateKey, password);
+    const vault = await encryptLocalSecret(privateKey, password, chain);
     localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
     $("#existing-private-key").value = "";
     $("#existing-wallet-password").value = "";
-    $("#vault-action-status").textContent = "Encrypted local backup created. It is not a live bot signer until an audited wallet SDK and signer policy are connected.";
+    $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} local backup created. It is not a live bot signer until an audited wallet SDK and signer policy are connected.`;
   }
 
   async function createInternalWallet() {
