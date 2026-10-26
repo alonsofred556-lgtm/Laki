@@ -14,7 +14,7 @@
       ] }
     ]
   };
-  const state = { data: fallback, live: false, history: null, bridgeActivity: null, metadata: new Map(), activityLoadedAt: 0, quoteRequest: 0 };
+  const state = { data: fallback, live: false, history: null, bridgeActivity: null, metadata: new Map(), persistedOpportunities: [], activityLoadedAt: 0, quoteRequest: 0 };
   const $ = (selector) => document.querySelector(selector);
   const money = (value, digits = 2) => value == null || Number.isNaN(value) ? "—" : `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}`;
   const compact = (value) => value >= 1 ? `$${value.toFixed(2)}` : `$${value.toFixed(5)}`;
@@ -44,9 +44,9 @@
     const dearest = pools.reduce((a, b) => a.priceUsd > b.priceUsd ? a : b);
     const gross = ((dearest.priceUsd - cheapest.priceUsd) / cheapest.priceUsd) * 100;
     const depth = Math.min(cheapest.depth || 0, dearest.depth || 0);
-    const costBuffer = launch.slug === "zgap" ? 0.42 : 0.55;
-    const net = Math.max(0, gross - costBuffer);
-    return { ...launch, cheapest, dearest, gross, net, depth, confidence: Math.min(98, Math.round(72 + Math.min(gross * 5, 24))) };
+    // A pool spread is not a profit forecast. Exact trade, bridge, gas, and
+    // risk costs are requested only in the route preview/backend scanner.
+    return { ...launch, cheapest, dearest, gross, net: gross, depth };
   }
 
   function render() {
@@ -56,13 +56,13 @@
     $("#opportunity-count").textContent = String(opportunities.length).padStart(2, "0");
     $("#nav-opportunity-count").textContent = String(opportunities.length).padStart(2, "0");
     $("#metric-routes").textContent = String(opportunities.length).padStart(2, "0");
-    $("#metric-edge").textContent = opportunities[0] ? `${opportunities[0].net.toFixed(2)}%` : "—";
+    $("#metric-edge").textContent = opportunities[0] ? `${opportunities[0].gross.toFixed(2)}%` : "—";
     list.innerHTML = visibleOpportunities.map((item) => `
       <article class="opportunity-row">
         <div class="token-name"><span class="token-symbol">${logoMarkup(item)}</span><div><strong>$${item.symbol}</strong><small>${item.name}</small></div></div>
         <div class="route"><strong>${chainShort[item.cheapest.chain]} <span>→</span> ${chainShort[item.dearest.chain]}</strong><small>${chainNames[item.cheapest.chain]} to ${chainNames[item.dearest.chain]} · ${compact(item.depth)} depth</small></div>
-        <div class="edge"><strong>+${item.net.toFixed(2)}%</strong><small>net est. edge</small></div>
-        <div class="confidence"><i></i>${item.confidence}%<small> confidence</small></div>
+        <div class="edge"><strong>+${item.gross.toFixed(2)}%</strong><small>observed gap</small></div>
+        <div class="confidence"><i></i>LIVE<small>quote pending</small></div>
         <button class="row-action" data-preview="${item.slug}">Preview</button>
       </article>`).join("");
     list.querySelectorAll("img[data-fallback]").forEach((image) => image.addEventListener("error", () => image.replaceWith(document.createTextNode(image.dataset.fallback || "TOKEN")), { once: true }));
@@ -116,15 +116,17 @@
 
   async function load() {
     try {
-      const [response, registryResponse] = await Promise.all([
+      const [response, registryResponse, opportunityResponse] = await Promise.all([
         fetch(config.marketDataUrl || config.pangeaPoolsUrl, { headers: { Accept: "application/json" } }),
-        fetch(config.tokenRegistryUrl, { headers: { Accept: "application/json" } })
+        fetch(config.tokenRegistryUrl, { headers: { Accept: "application/json" } }),
+        fetch(`${config.apiBaseUrl}/api/opportunities?limit=100`, { headers: { Accept: "application/json" } })
       ]);
       if (!response.ok) throw new Error(`Pangea responded ${response.status}`);
       const data = await response.json();
       if (!Array.isArray(data.launches)) throw new Error("Unexpected Pangea payload");
       const selected = data.launches.filter((launch) => launch && launch.slug);
       if (selected.length) {
+        state.persistedOpportunities = opportunityResponse.ok ? ((await opportunityResponse.json()).opportunities || []) : [];
         const registry = registryResponse.ok ? await registryResponse.json() : { tokens: [] };
         const bySlug = new Map((registry.tokens || []).map((item) => [item.slug, item]));
         await loadMetadata(selected);
@@ -144,8 +146,13 @@
     if (!item) return;
     $("#preview-title").textContent = `$${item.symbol} route preview`;
     $("#preview-route").innerHTML = `<strong>${chainNames[item.cheapest.chain]}</strong> <span>→</span> <strong>${chainNames[item.dearest.chain]}</strong><br><small>Buy on the cheaper pool, bridge only if required, then sell on the dearer pool.</small>`;
-    $("#preview-stats").innerHTML = [["Observed spread", `+${item.gross.toFixed(2)}%`], ["Net estimate", `+${item.net.toFixed(2)}%`], ["Min. route depth", compact(item.depth)], ["Mode", "Read-only quotes"]].map(([label, value]) => `<div class="preview-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
+    $("#preview-stats").innerHTML = [["Observed gap", `+${item.gross.toFixed(2)}%`], ["Min. route depth", compact(item.depth)], ["Mode", "Read-only quotes"], ["Decision", "Fees + risk required"]].map(([label, value]) => `<div class="preview-stat"><small>${label}</small><strong>${value}</strong></div>`).join("");
     $("#preview-quote").textContent = "Requesting read-only Pangea trade and bridge quotes…";
+    const persisted = state.persistedOpportunities.find((row) => row.slug === item.slug && row.buyChain === item.cheapest.chain && row.sellChain === item.dearest.chain);
+    const prepare = $("#prepare-route");
+    prepare.disabled = !persisted;
+    prepare.dataset.opportunityId = persisted?.id || "";
+    prepare.textContent = persisted ? "Prepare bot route →" : "Run scanner worker first";
     openModal("#preview-modal");
     loadRouteQuotes(item);
   }
@@ -182,12 +189,36 @@
     $("#preview-quote").textContent = `Pangea read-only quote · $25 notional · ${labels.join(" · ")}`;
   }
 
+  async function prepareRoute(button) {
+    const opportunityId = button?.dataset.opportunityId;
+    if (!opportunityId) return;
+    button.disabled = true;
+    button.textContent = "Checking execution gate…";
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/execution/plan`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ opportunityId })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || result.reason || "Execution remains gated");
+      $("#preview-quote").textContent = `Execution ${result.execution?.state || "planned"}. The signer must still validate and approve each exact leg.`;
+    } catch (error) {
+      $("#preview-quote").textContent = error?.message || "Execution remains gated until wallet authentication and signer approval are complete.";
+    } finally {
+      button.disabled = false;
+      button.textContent = "Prepare bot route →";
+    }
+  }
+
   document.addEventListener("click", (event) => {
     if (event.target.matches("[data-close-modal]")) closeModal(event.target);
     if (event.target.classList.contains("modal-backdrop")) closeModal(event.target);
     if (event.target.closest("#wallet-button, #vault-connect")) openModal("#wallet-modal");
     const provider = event.target.closest("[data-connect-provider]");
     if (provider) { $("#wallet-label").textContent = "Connected wallet"; closeModal(provider); }
+    if (event.target.closest("#prepare-route")) prepareRoute(event.target.closest("#prepare-route"));
   });
   $("#refresh-button").addEventListener("click", load);
   render();

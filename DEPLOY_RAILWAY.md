@@ -2,13 +2,14 @@
 
 ## Services
 
-Create two Railway services in the same project:
+Create these Railway services in the same project:
 
 1. Coni web/API service from this repository.
 2. Railway PostgreSQL service.
 3. A private Redis service (or a private Redis provider).
 4. A deposit worker service from `railway.worker.toml`.
 5. A reconciliation worker service from `railway.reconciliation.toml`.
+6. A private arbitrage scanner service from `railway.arbitrage.toml`.
 
 The web service uses Gunicorn with Django and receives Railway's `PORT` automatically. The old Node server is retained only as a migration fallback; it is not the Railway entrypoint.
 
@@ -28,6 +29,7 @@ CONI_AUTH_URI=https://laki-production.up.railway.app
 CONI_OPS_TOKEN=<separate random operations token>
 CONI_EXECUTION_MODE=disabled
 CONI_SIGNER_URL=
+CONI_SIGNER_PROVISION_SECRET=<separate private signer callback secret>
 CONI_LIVE_TRADING_CONFIRMATION=
 CONI_SIGNER_AUDIT_APPROVED=false
 CONI_REDIS_URL=${{Redis.REDIS_URL}}
@@ -35,6 +37,9 @@ CONI_REDIS_REQUIRED=true
 CONI_FUNDING_RECIPIENTS={"ETH":"<reviewed Ethereum destination>","BNB":"<reviewed BNB destination>","SOL":"<reviewed Solana destination>"}
 CONI_FEE_RECIPIENTS={"ETH":"<reviewed Ethereum fee destination>","BNB":"<reviewed BNB fee destination>","SOL":"<reviewed Solana fee destination>"}
 CONI_TRADING_FEE_BPS=25
+# Pangea launch fees range from 0.3% to 5%; keep this conservative default
+# until each launch's exact fee is loaded and verified server-side.
+CONI_DEFAULT_LAUNCH_FEE_BPS=500
 CONI_BOT_FUNDING_FEE_BPS=0
 CONI_DEFAULT_COST_BUFFER_BPS=55
 CONI_RPC_URLS={"ethereum":"<server-side RPC URL>","base":"<server-side RPC URL>","robinhood":"<server-side RPC URL>","bsc":"<server-side RPC URL>"}
@@ -60,7 +65,7 @@ python manage.py migrate
 python manage.py check --deploy
 ```
 
-The migration creates wallet challenges, identities, ledger accounts, funding intents, deposit observations, chain cursors, audit events, reconciliation runs, withdrawal requests, fee events, bot controls, and execution records.
+The migration creates wallet challenges, identities, per-chain bot-wallet records, bot-isolated ledger accounts, funding intents, deposit observations, chain cursors, audit events, reconciliation runs, withdrawal requests, fee events, bot controls, opportunities, settlements, and execution records.
 
 ## Funding verification worker
 
@@ -87,6 +92,33 @@ python manage.py reconcile_ledger --loop-seconds 60
 ```
 
 It checks that every credited deposit has exactly one ledger entry, pending withdrawals have reservations, completed withdrawals have settlements, and user balances are never negative. It records every run and anomaly in PostgreSQL and does not mutate history. Chain-level reconciliation still requires provider-specific balance reports and operator review.
+
+## Arbitrage scanner worker
+
+Create a separate private Railway service from `railway.arbitrage.toml`:
+
+```text
+python manage.py scan_arbitrage --loop-seconds 30
+```
+
+Set `CONI_ARBITRAGE_REQUIRE_QUOTES=true` and configure only public bot wallet addresses for quote requests. The worker follows buy → Pangea canonical bridge quote → sell-on-delivered-amount, persists rejected/take-paper decisions, and never signs or broadcasts. Each authenticated identity also receives five durable bot-wallet placeholders; an address is usable only after the private signer/MPC service provisions and attests it through the private callback endpoint. It must not be treated as a live trader until the signer, simulation, approval, bridge-arrival, and reconciliation controls are independently reviewed.
+
+## Quote-bound execution planner
+
+After the signer/treasury service, ledger reconciliation, and approval policy
+have passed review, create one more private Railway service using
+`railway.execution-planner.toml`:
+
+```text
+python manage.py plan_arbitrage_executions --loop-seconds 30 --max-plans 10
+```
+
+This worker requires `CONI_EXECUTION_MODE=live`, an approved signer, an
+enabled and unpaused bot control, active per-user bot wallets, and a positive
+native-asset ledger balance on both route wallets. It fetches fresh Pangea
+trade and bridge quotes for each user, stores a hash-bound execution plan, and
+stops when the route no longer clears the net-profit policy. It does not sign,
+broadcast, withdraw, or transfer funds; only the separate signer may do that.
 
 ## Smoke checks
 

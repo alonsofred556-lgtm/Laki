@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 import re
 import secrets
@@ -22,8 +24,12 @@ from .layerzero import route_summary
 from .assets import asset_decimals, native_asset, recipient_for, supported_asset
 from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
-from .models import AuditEvent, BotControl, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
+from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
+from .bot_wallets import bot_wallet_payload, bot_wallet_summary, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets
+from .execution import create_execution_from_opportunity, execution_payload, record_execution_event
+from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
+from .profit_settlement import prepare_usdg_settlement
 from .rate_limit import RateLimitUnavailable, allow as redis_allow
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
@@ -35,6 +41,8 @@ SOL_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 EVM_TX_RE = re.compile(r"^0x[a-fA-F0-9]{64}$")
 SOL_TX_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{40,100}$")
 IDEMPOTENCY_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+SIGNER_REF_RE = re.compile(r"^[A-Za-z0-9._:/-]{8,128}$")
+HASH_RE = re.compile(r"^(0x)?[a-fA-F0-9]{64}$")
 
 
 def api_response(data, status=200, request=None, extra=None):
@@ -73,6 +81,35 @@ def post_allowed(request):
 def ops_allowed(request):
     configured = settings.CONI_OPS_TOKEN
     return bool(configured and secrets.compare_digest(request.headers.get("X-Coni-Ops-Token", ""), configured))
+
+
+def signer_provision_allowed(request):
+    return signer_callback_allowed(request, settings.CONI_SIGNER_PROVISION_SECRET, "X-Coni-Signer-Provision-Secret")
+
+
+def signer_event_allowed(request):
+    return signer_callback_allowed(request, settings.CONI_SIGNER_EVENT_SECRET, "X-Coni-Signer-Event-Secret")
+
+
+def signer_callback_allowed(request, configured, legacy_header):
+    """Authenticate a private signer callback and prevent delayed replays."""
+    if not configured:
+        return False
+    timestamp = request.headers.get("X-Coni-Signer-Timestamp", "")
+    signature = request.headers.get("X-Coni-Signer-Signature", "")
+    try:
+        timestamp_int = int(timestamp)
+    except (TypeError, ValueError):
+        timestamp_int = 0
+    now = int(timezone.now().timestamp())
+    if timestamp_int and abs(now - timestamp_int) <= settings.CONI_SIGNER_CALLBACK_MAX_SKEW_SECONDS and re.fullmatch(r"[a-fA-F0-9]{64}", signature or ""):
+        message = f"{timestamp_int}.".encode() + request.body
+        expected = hmac.new(configured.encode(), message, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(signature.lower(), expected.lower())
+    if settings.CONI_SIGNER_CALLBACK_REQUIRE_HMAC:
+        return False
+    supplied = request.headers.get(legacy_header, "") or request.headers.get("Authorization", "").removeprefix("Bearer ")
+    return bool(supplied and secrets.compare_digest(supplied, configured))
 
 
 def request_id(request):
@@ -150,7 +187,7 @@ def execution_ready():
 def bot_status():
     control, _ = BotControl.objects.get_or_create(scope="global")
     recipients = parse_json_setting(settings.CONI_FEE_RECIPIENTS)
-    return {"mode": settings.CONI_EXECUTION_MODE, "executionReady": execution_ready(), "database": True, "enabled": control.enabled, "paused": control.paused, "minNetBps": control.min_net_bps, "maxNotionalUsd": float(control.max_notional_usd), "signerConfigured": bool(settings.CONI_SIGNER_URL), "signerAuditApproved": settings.CONI_SIGNER_AUDIT_APPROVED, "feeConfigConfigured": bool(recipients)}
+    return {"mode": settings.CONI_EXECUTION_MODE, "executionReady": execution_ready(), "database": True, "enabled": control.enabled, "paused": control.paused, "minNetBps": control.min_net_bps, "maxNotionalUsd": float(control.max_notional_usd), "signerConfigured": bool(settings.CONI_SIGNER_URL), "signerAuditApproved": settings.CONI_SIGNER_AUDIT_APPROVED, "feeConfigConfigured": bool(recipients), "quoteRequired": settings.CONI_ARBITRAGE_REQUIRE_QUOTES, "riskBufferBps": settings.CONI_ARBITRAGE_RISK_BUFFER_BPS, "profitSettlement": {"enabled": settings.CONI_PROFIT_SETTLEMENT_ENABLED, "asset": settings.CONI_PROFIT_SETTLEMENT_ASSET, "chain": settings.CONI_PROFIT_SETTLEMENT_CHAIN, "tokenConfigured": bool(settings.CONI_PROFIT_SETTLEMENT_TOKEN_ADDRESS), "decimalsConfigured": settings.CONI_PROFIT_SETTLEMENT_DECIMALS is not None}}
 
 
 def health(request):
@@ -249,12 +286,14 @@ def auth_verify(request):
             identity, _ = WalletIdentity.objects.get_or_create(chain=challenge.chain, address=challenge.address)
             identity.last_authenticated_at = timezone.now()
             identity.save(update_fields=["last_authenticated_at"])
+            bot_wallets = ensure_bot_wallets(identity, mode="external-bot")
+            bot_wallet = next(item for item in bot_wallets if item.chain == identity.chain)
         request.session.cycle_key()
         request.session["wallet_identity_id"] = str(identity.id)
         request.session["wallet_chain"] = identity.chain
         request.session["wallet_address"] = identity.address
         record_event("wallet.authenticate", actor_type="wallet", actor_id=identity.id, subject_type="wallet", subject_id=identity.id, request_id=request_id(request), metadata={"chain": identity.chain})
-        return api_response({"authenticated": True, "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address}}, 200, request)
+        return api_response({"authenticated": True, "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address}, "botWallet": bot_wallet_payload(bot_wallet), "botWallets": [bot_wallet_payload(item) for item in bot_wallets]}, 200, request)
     except Exception as exc:
         return error("wallet signature verification failed", 401, request) if not settings.DEBUG else error(str(exc), 400, request)
 
@@ -269,7 +308,91 @@ def auth_logout(request):
 
 def auth_session(request):
     identity = session_identity(request)
-    return api_response({"authenticated": bool(identity), "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address} if identity else None}, 200, request)
+    wallets = ensure_bot_wallets(identity, mode="external-bot") if identity else []
+    current = next((item for item in wallets if item.chain == identity.chain), None) if identity else None
+    return api_response({"authenticated": bool(identity), "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address} if identity else None, "botWallet": bot_wallet_payload(current) if current else None, "botWallets": [bot_wallet_payload(item) for item in wallets]}, 200, request)
+
+
+def bot_wallet_view(request):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    return api_response(bot_wallet_summary(identity), 200, request)
+
+
+@csrf_exempt
+def bot_wallet_provision(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        identity = require_session(request)
+        data = body(request)
+        mode = str(data.get("mode", "external-bot"))
+        wallets = ensure_bot_wallets(identity, mode=mode)
+        current = next(item for item in wallets if item.chain == identity.chain)
+        return api_response({"wallet": bot_wallet_payload(current), "wallets": [bot_wallet_payload(item) for item in wallets], "message": "The bot wallet records exist, but real addresses require the audited signer/MPC provisioner. No private key is generated or stored by Coni."}, 200, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 400, request)
+
+
+@csrf_exempt
+def bot_wallet_transfer(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        identity = require_session(request)
+        data = body(request)
+        amount = str(data.get("amountBaseUnits", ""))
+        if not amount.isdigit() or int(amount) <= 0 or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
+            return error("invalid bot wallet transfer", 400, request)
+        transfer = create_bot_transfer(identity=identity, wallet_id=data.get("botWalletId"), direction=str(data.get("direction", "")), asset=str(data.get("asset", "")).upper(), amount_base_units=amount, destination=str(data.get("destination", "")), idempotency_key=data["idempotencyKey"])
+        return api_response({"transferId": str(transfer.id), "state": transfer.state, "direction": transfer.direction, "asset": transfer.asset, "chain": transfer.chain, "amountBaseUnits": str(transfer.amount_base_units), "destination": transfer.destination, "message": "Transfer is awaiting signer approval; no transaction has been signed or broadcast."}, 201, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except ValueError as exc:
+        return error(str(exc), 409, request)
+
+
+@csrf_exempt
+def signer_bot_wallet_attest(request):
+    """Private callback used by the audited HSM/MPC provisioner.
+
+    The callback binds a public address to a durable bot-wallet record. It
+    deliberately accepts no private key, seed, calldata, or user-supplied
+    custody material. Private networking/mTLS and an independent signer audit
+    remain deployment requirements.
+    """
+    if request.method != "POST" or not signer_provision_allowed(request):
+        return error("signer provisioning authorization required", 403, request)
+    try:
+        data = body(request)
+        if set(data) - {"botWalletId", "chain", "address", "signerKeyRef", "attestationHash"}:
+            return error("unexpected signer provisioning fields", 400, request)
+        if not data.get("botWalletId") or not isinstance(data.get("chain"), str) or data["chain"] not in CHAINS:
+            return error("invalid bot wallet provisioning request", 400, request)
+        address = str(data.get("address", ""))
+        key_ref = str(data.get("signerKeyRef", ""))
+        attestation = str(data.get("attestationHash", ""))
+        if not wallet_address_valid(data["chain"], address) or not SIGNER_REF_RE.fullmatch(key_ref) or not HASH_RE.fullmatch(attestation):
+            return error("invalid signer attestation", 400, request)
+        with transaction.atomic():
+            wallet = BotWallet.objects.select_for_update().filter(id=data["botWalletId"], chain=data["chain"]).first()
+            if not wallet:
+                return error("bot wallet not found", 404, request)
+            if wallet.address and wallet.address.lower() != address.lower():
+                return error("bot wallet address rotation requires a new audited record", 409, request)
+            wallet.address = address
+            wallet.signer_key_ref = key_ref
+            wallet.custody = "audited-signer"
+            wallet.status = "active"
+            wallet.save(update_fields=["address", "signer_key_ref", "custody", "status", "updated_at"])
+        record_event("bot_wallet.attested", actor_type="signer", actor_id=key_ref, subject_type="bot_wallet", subject_id=wallet.id, metadata={"chain": wallet.chain, "attestationHash": attestation})
+        return api_response({"wallet": bot_wallet_payload(wallet), "state": "active"}, 200, request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 400, request)
 
 
 def pangea_proxy(request, path, query=None, method="GET"):
@@ -354,19 +477,24 @@ def funding_intent(request):
         identity = require_session(request)
         data = body(request)
         asset, amount, wallet = str(data.get("asset", "")).upper(), str(data.get("amount", "")), data.get("wallet")
+        bot_wallet = None
+        if data.get("botWalletId"):
+            bot_wallet = BotWallet.objects.filter(id=data.get("botWalletId"), owner=identity, chain=identity.chain, status="active").first()
+            if not bot_wallet or not bot_wallet.address:
+                return error("the selected bot wallet is not provisioned by the audited signer", 409, request)
         decimals = asset_decimals(asset, identity.chain)
         if not supported_asset(asset, identity.chain) or decimals is None or not wallet_address_valid(identity.chain, wallet) or wallet.lower() != identity.address.lower():
             return error("invalid funding request", 400, request)
         if ((asset in ASSET_DECIMALS and asset != native_asset(identity.chain)) or (asset not in ASSET_DECIMALS and not supported_asset(asset, identity.chain))):
             return error("funding asset does not match connected chain", 400, request)
         amount_base = decimal_units(amount, decimals)
-        destination = recipient_for(asset, identity.chain)
+        destination = bot_wallet.address if bot_wallet else recipient_for(asset, identity.chain)
         if not amount_base or not wallet_address_valid(identity.chain, destination):
             return error("funding destination or amount is not configured", 503, request)
         expires = timezone.now() + timedelta(minutes=5)
-        intent = FundingIntent.objects.create(wallet_identity=identity, asset=asset, chain=identity.chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
+        intent = FundingIntent.objects.create(wallet_identity=identity, bot_wallet=bot_wallet, asset=asset, chain=identity.chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
         record_event("funding.intent.created", actor_type="wallet", actor_id=identity.id, subject_type="funding_intent", subject_id=intent.id, request_id=request_id(request), metadata={"asset": asset, "chain": identity.chain, "amountBaseUnits": amount_base})
-        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": identity.chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "expiresAt": expires.isoformat()}, 201, request)
+        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": identity.chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "botWalletId": str(bot_wallet.id) if bot_wallet else None, "expiresAt": expires.isoformat()}, 201, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -596,6 +724,54 @@ def bot_scan(request):
         return error(str(exc), 502, request)
 
 
+def opportunities(request):
+    try:
+        limit = int(request.GET.get("limit", "100"))
+    except ValueError:
+        return error("invalid opportunities query", 400, request)
+    if not 1 <= limit <= 100:
+        return error("invalid opportunities query", 400, request)
+    rows = ArbitrageOpportunity.objects.order_by("-detected_at")[:limit]
+
+    def public_decision(decision):
+        """Expose discovery facts without returning signer-bound quote data."""
+        if not isinstance(decision, dict):
+            return {}
+        allowed = {
+            "executable", "quoteState", "reasons", "netBps", "netProfitUsd",
+            "buyAmountBaseUnits", "sellAmountBaseUnits", "tokenOutBaseUnits",
+            "bridgeRoute",
+        }
+        safe = {key: decision[key] for key in allowed if key in decision}
+        route = safe.get("bridgeRoute")
+        if isinstance(route, dict):
+            safe["bridgeRoute"] = {
+                key: route[key]
+                for key in ("id", "amountOut", "nativeFee", "tokenFee", "setupFee", "seconds", "state")
+                if key in route
+            }
+        return safe
+
+    return api_response({
+        "opportunities": [{
+            "id": str(item.id),
+            "slug": item.slug,
+            "symbol": item.symbol,
+            "buyChain": item.buy_chain,
+            "sellChain": item.sell_chain,
+            "buyToken": item.buy_token,
+            "sellToken": item.sell_token,
+            "notionalUsd": str(item.notional_usd),
+            "netProfitUsd": str(item.net_profit_usd),
+            "netBps": item.net_bps,
+            "state": item.state,
+            "quoteHash": item.quote_hash,
+            "decisionSummary": public_decision(item.decision),
+            "detectedAt": item.detected_at.isoformat(),
+            "expiresAt": item.expires_at.isoformat() if item.expires_at else None,
+        } for item in rows]}, 200, request)
+
+
 def fees_config(request):
     if not ops_allowed(request):
         return error("operations authorization required", 403, request)
@@ -621,7 +797,25 @@ def profit_summary(request):
         return error("operations authorization required", 403, request)
     settled = Execution.objects.filter(state="settled")
     total = sum((item.expected_profit_usd or Decimal("0") for item in settled), Decimal("0"))
-    return api_response({"executions": settled.count(), "expectedProfitUsd": str(total), "realizedProfitUsd": None, "note": "Realized profit is reported only after confirmed fills and ledger settlement."}, 200, request)
+    return api_response({"executions": settled.count(), "expectedProfitUsd": str(total), "realizedProfitUsd": None, "settlement": {"asset": settings.CONI_PROFIT_SETTLEMENT_ASSET, "chain": settings.CONI_PROFIT_SETTLEMENT_CHAIN, "enabled": settings.CONI_PROFIT_SETTLEMENT_ENABLED}, "note": "Realized profit is paid in USDG only after confirmed fills and ledger settlement."}, 200, request)
+
+
+@csrf_exempt
+def prepare_profit_settlement(request):
+    if request.method != "POST" or not ops_allowed(request):
+        return error("operations authorization required", 403, request)
+    data = body(request)
+    try:
+        settlement = prepare_usdg_settlement(
+            execution_id=data["executionId"],
+            user_identity_id=data["userIdentityId"],
+            realized_profit_usd=data["realizedProfitUsd"],
+            usdg_price_usd=data["usdgPriceUsd"],
+            recipient=data["recipient"],
+        )
+        return api_response({"id": str(settlement.id), "state": settlement.state, "asset": settlement.settlement_asset, "chain": settlement.settlement_chain, "amountBaseUnits": str(settlement.amount_base_units), "recipient": settlement.recipient}, 201, request)
+    except (KeyError, ValueError, InvalidOperation) as exc:
+        return error(str(exc), 409, request)
 
 
 @csrf_exempt
@@ -631,17 +825,70 @@ def execution_plan(request):
     try:
         identity = require_session(request)
         data = body(request)
-        if not SLUG_RE.fullmatch(data.get("slug", "")) or not valid_amount(str(data.get("amount", ""))):
+        opportunity_id = data.get("opportunityId")
+        if not opportunity_id:
             return error("invalid execution plan", 400, request)
         status = bot_status()
         if not status["executionReady"] or status["paused"] or not status["enabled"]:
             return api_response({"error": "execution is gated", "status": status, "next": "Configure Postgres, the signer, fee recipients, risk policy, and explicit live approval."}, 409, request)
-        execution = Execution.objects.create(user_identity=identity, slug=data["slug"], state="quoted")
-        return api_response({"executionId": str(execution.id), "state": execution.state, "next": "The signer adapter must validate and sign the exact Pangea transaction steps."}, 202, request)
+        try:
+            opportunity = ArbitrageOpportunity.objects.get(id=opportunity_id)
+        except (ArbitrageOpportunity.DoesNotExist, ValueError, TypeError):
+            return error("opportunity not found", 404, request)
+        bot_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.buy_chain, mode="external-bot", status="active").first()
+        sell_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.sell_chain, mode="external-bot", status="active").first()
+        if not bot_wallet or not bot_wallet.address or not sell_wallet or not sell_wallet.address:
+            return api_response({"error": "user bot wallets are not provisioned on both route chains", "status": status, "botWallet": bot_wallet_payload(bot_wallet) if bot_wallet else None, "sellBotWallet": bot_wallet_payload(sell_wallet) if sell_wallet else None, "next": "Provision active audited signer/MPC bot wallets on the buy and sell chains before execution."}, 409, request)
+        try:
+            fresh = fresh_user_quotes(opportunity, buy_wallet=bot_wallet.address, sell_wallet=sell_wallet.address)
+        except PangeaError as exc:
+            return api_response({"error": "fresh opportunity quote rejected", "reason": str(exc), "status": status}, 409, request)
+        execution = create_execution_from_opportunity(identity=identity, opportunity_id=opportunity.id, bot_wallet=bot_wallet, decision=fresh, quote_hash=fresh["quoteHash"])
+        return api_response({"execution": execution_payload(execution), "next": "The signer adapter must independently validate and sign the exact Pangea transaction steps."}, 202, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
         return error(str(exc), 400, request)
+
+
+def execution_history(request):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    executions = Execution.objects.filter(user_identity=identity).order_by("-created_at")[:50]
+    return api_response({"executions": [execution_payload(item) for item in executions]}, 200, request)
+
+
+def execution_detail(request, execution_id):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    execution = Execution.objects.filter(id=execution_id, user_identity=identity).first()
+    if not execution:
+        return error("execution not found", 404, request)
+    return api_response({"execution": execution_payload(execution)}, 200, request)
+
+
+@csrf_exempt
+def signer_execution_event(request):
+    if request.method != "POST" or not signer_event_allowed(request):
+        return error("signer event authorization required", 403, request)
+    try:
+        data = body(request)
+        allowed = {"executionId", "event", "idempotencyKey", "txHash", "bridgeGuid", "realizedProfitUsd", "metadata"}
+        if set(data) - allowed or not data.get("executionId") or not isinstance(data.get("event"), str) or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
+            return error("invalid signer execution event", 400, request)
+        tx_hash, bridge_guid = str(data.get("txHash", "")), str(data.get("bridgeGuid", ""))
+        if tx_hash and len(tx_hash) > 160 or bridge_guid and len(bridge_guid) > 128:
+            return error("invalid signer execution event reference", 400, request)
+        execution = record_execution_event(execution_id=data["executionId"], event=data["event"], idempotency_key=data["idempotencyKey"], tx_hash=tx_hash, bridge_guid=bridge_guid, realized_profit_usd=data.get("realizedProfitUsd"), metadata=data.get("metadata"))
+        return api_response({"execution": execution_payload(execution)}, 200, request)
+    except Execution.DoesNotExist:
+        return error("execution not found", 404, request)
+    except (ValueError, TypeError, InvalidOperation, json.JSONDecodeError) as exc:
+        return error(str(exc), 409, request)
 
 
 def frontend(request, filename="index.html"):

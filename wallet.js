@@ -3,6 +3,9 @@
   const state = { evm: null, solana: null };
   let activeIntent = null;
   let fundingPollTimer = null;
+  let activeBotWallet = null;
+  let botFundingMode = false;
+  let preferredBotMode = localStorage.getItem("coni.bot-wallet.mode.v1") || "external-bot";
   const STORAGE_KEY = "coni.wallet.connections.v1";
   const $ = (selector) => document.querySelector(selector);
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
@@ -101,7 +104,9 @@
       const chain = Object.entries(config.wallets.evmChains).find(([, id]) => id === chainId)?.[0];
       if (!chain) throw new Error("Unsupported EVM chain");
       await authenticateWallet(chain, address, (messageText) => provider.request({ method: "personal_sign", params: [messageText, address] }));
-      state.evm = { provider, address, chainId, chainName: chainNames[chainId] || `Chain ${chainId}`, balance, providerName: providerLabel(provider), authenticated: true };
+      preferredBotMode = "external-bot";
+      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      state.evm = { provider, address, chain, chainId, chainName: chainNames[chainId] || `Chain ${chainId}`, balance, providerName: providerLabel(provider), authenticated: true };
       saveConnections();
       renderConnections();
       message(`${state.evm.chainName} wallet connected.`, "success");
@@ -134,7 +139,9 @@
         const bytes = signed.signature || signed;
         return btoa(String.fromCharCode(...bytes));
       });
-      state.solana = { provider, address, balance, providerName: providerLabel(provider, true), authenticated: true };
+      preferredBotMode = "external-bot";
+      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
       saveConnections();
       renderConnections();
       message("Solana wallet connected.", "success");
@@ -166,11 +173,11 @@
     if (!/^\d+(\.\d{1,18})?$/.test(amount) || Number(amount) <= 0) { $("#funding-status").textContent = "Enter a positive amount with no more than 18 decimal places."; return; }
     $("#funding-status").textContent = "Asking the secure backend for a whitelisted funding intent…";
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, wallet: asset === "SOL" ? state.solana?.address : state.evm?.address }) });
+      const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, wallet: asset === "SOL" ? state.solana?.address : state.evm?.address, botWalletId: botFundingMode ? activeBotWallet?.id : null }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Funding intent rejected");
       activeIntent = result;
-      $("#funding-status").textContent = `Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}. Review the full destination in your wallet before approving.`;
+      $("#funding-status").textContent = `${result.botWalletId ? "Bot top-up: " : ""}Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}. Review the full destination in your wallet before approving.`;
       $("#approve-funding").hidden = !(result.chain !== "solana" && state.evm?.provider && !state.evm?.restored);
       $("#funding-hash-row").hidden = false;
       $("#claim-funding").hidden = false;
@@ -237,14 +244,139 @@
     }
   }
 
+  function esc(value) {
+    return String(value ?? "—").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+  }
+
+  function setNativeAssetOptions(chain) {
+    const asset = chain === "solana" ? "SOL" : chain === "bsc" ? "BNB" : "ETH";
+    [$("#funding-asset"), $("#bot-withdraw-asset")].forEach((select) => {
+      if (!select) return;
+      select.innerHTML = `<option value="${asset}">${asset}</option>`;
+      select.value = asset;
+    });
+  }
+
+  async function loadBotWallet() {
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet`, { credentials: "include", cache: "no-store" });
+      if (response.status === 401) {
+        $("#bot-wallet-state").textContent = "CONNECT FIRST";
+        $("#bot-wallet-content").querySelector("p").textContent = "Connect and sign in with a wallet. Coni will then create this user's separate bot-wallet record.";
+        return;
+      }
+      const result = await response.json();
+      const currentChain = state.solana?.authenticated ? "solana" : state.evm?.chain || result.currentChain;
+      const wallet = result.wallets?.find((item) => item.mode === preferredBotMode && item.chain === currentChain) || result.wallets?.find((item) => item.mode === "external-bot" && item.chain === currentChain) || result.currentWallet || result.wallets?.[0];
+      activeBotWallet = wallet || null;
+      setNativeAssetOptions(wallet?.chain);
+      $("#internal-wallet-toggle").hidden = wallet?.mode !== "internal-bot";
+      $("#bot-wallet-state").textContent = wallet?.status === "active" ? "ACTIVE" : "GATED";
+      if (!wallet) return;
+      const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";
+      $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
+      const tokens = (result.tradedTokens || []).map((item) => `<span class="network-pill">${esc(item.slug)}</span>`).join(" ") || "No completed token trades";
+      $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(result.pnl?.realizedUsd || "0")}</b><small>${esc(result.pnl?.settledTrades || 0)} settled trades · ${esc(result.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (result.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+    } catch {
+      $("#bot-wallet-state").textContent = "UNAVAILABLE";
+    }
+  }
+
+  async function encryptLocalSecret(secret, password) {
+    const encoder = new TextEncoder();
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(secret));
+    const encode = (bytes) => btoa(String.fromCharCode(...bytes));
+    return { version: 1, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
+  }
+
+  async function importLocalWallet() {
+    const privateKey = $("#existing-private-key").value.trim();
+    const password = $("#existing-wallet-password").value;
+    if (!/^0x[a-fA-F0-9]{64}$/.test(privateKey) || password.length < 12) {
+      $("#vault-action-status").textContent = "Enter a valid EVM private key and a password of at least 12 characters. The key remains in this browser and is never posted.";
+      return;
+    }
+    const vault = await encryptLocalSecret(privateKey, password);
+    localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
+    $("#existing-private-key").value = "";
+    $("#existing-wallet-password").value = "";
+    $("#vault-action-status").textContent = "Encrypted local backup created. It is not a live bot signer until an audited wallet SDK and signer policy are connected.";
+  }
+
+  async function createInternalWallet() {
+    const password = $("#new-wallet-password").value;
+    const confirm = $("#new-wallet-password-confirm").value;
+    if (password.length < 12 || password !== confirm) {
+      $("#vault-action-status").textContent = "Use a password of at least 12 characters and confirm it exactly.";
+      return;
+    }
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/provision`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "internal-bot" }) });
+      const result = await response.json();
+      preferredBotMode = "internal-bot";
+      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      $("#vault-action-status").textContent = result.message || "Internal wallet setup is awaiting the audited wallet provisioner.";
+      loadBotWallet();
+    } catch {
+      $("#vault-action-status").textContent = "Connect and authenticate a wallet before creating the internal-wallet record.";
+    }
+  }
+
+  function startBotTopup() {
+    if (!activeBotWallet) { $("#funding-status").textContent = "Connect a wallet first; the per-user bot wallet record will be attached automatically."; return; }
+    botFundingMode = true;
+    $("#funding-status").textContent = activeBotWallet.status === "active" ? "Bot top-up mode enabled. Choose the asset and amount, then prepare the verified transfer." : "This bot wallet is awaiting audited signer provisioning, so top-up is not enabled yet.";
+    document.querySelector("#funding").scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  async function requestBotWithdrawal() {
+    if (!activeBotWallet || activeBotWallet.status !== "active") { $("#funding-status").textContent = "Withdrawal is unavailable until this user's bot wallet has an audited signer address."; return; }
+    $("#bot-withdraw-form").hidden = !$("#bot-withdraw-form").hidden;
+  }
+
+  async function submitBotWithdrawal() {
+    if (!activeBotWallet || activeBotWallet.status !== "active") throw new Error("bot wallet is not active");
+    const asset = $("#bot-withdraw-asset").value;
+    const amount = $("#bot-withdraw-amount").value.trim();
+    const decimals = asset === "SOL" ? 9 : 18;
+    if (!/^\d+(\.\d+)?$/.test(amount)) throw new Error("enter a valid withdrawal amount");
+    const amountBaseUnits = toBaseUnits(amount, decimals).toString();
+    const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/transfer`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ botWalletId: activeBotWallet.id, direction: "withdrawal", asset, amountBaseUnits, destination: state.solana?.address && asset === "SOL" ? state.solana.address : state.evm?.address, idempotencyKey: `bot-withdrawal-${crypto.randomUUID()}` }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || result.message || "withdrawal request rejected");
+    $("#funding-status").textContent = `Bot withdrawal reserved for signer approval: ${result.state}. No transaction has been broadcast.`;
+    $("#bot-withdraw-form").hidden = true;
+    loadBotWallet();
+  }
+
   $("#connect-evm").addEventListener("click", connectEvm);
   $("#connect-solana").addEventListener("click", connectSolana);
   $("#prepare-funding").addEventListener("click", prepareFunding);
   $("#approve-funding").addEventListener("click", () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; }));
   $("#claim-funding").addEventListener("click", submitFundingClaim);
   $("#vault-setup").addEventListener("click", () => { $("#vault-modal").hidden = false; document.body.style.overflow = "hidden"; });
+  $("#bot-topup").addEventListener("click", startBotTopup);
+  $("#bot-withdraw").addEventListener("click", requestBotWithdrawal);
+  $("#submit-bot-withdrawal").addEventListener("click", () => submitBotWithdrawal().catch((error) => { $("#funding-status").textContent = error?.message || "Bot withdrawal could not be requested."; }));
+  $("#import-local-wallet").addEventListener("click", () => importLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local encryption failed; no key was uploaded."; }));
+  $("#create-internal-wallet").addEventListener("click", createInternalWallet);
+  document.querySelectorAll("[data-surface]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-surface]").forEach((item) => item.classList.toggle("active", item === button));
+    document.body.dataset.walletSurface = button.dataset.surface;
+    $("#bot-wallet-state").textContent = button.dataset.surface === "bot" ? (activeBotWallet?.status === "active" ? "ACTIVE" : "GATED") : "NORMAL VIEW";
+  }));
+  document.querySelectorAll("[data-wallet-mode]").forEach((button) => button.addEventListener("click", () => {
+    document.querySelectorAll("[data-wallet-mode]").forEach((item) => item.classList.toggle("active", item === button));
+    $("#existing-wallet-panel").hidden = button.dataset.walletMode !== "existing";
+    $("#new-wallet-panel").hidden = button.dataset.walletMode !== "new";
+  }));
   document.addEventListener("click", (event) => { if (event.target.matches("[data-close-modal]") || event.target.classList.contains("modal-backdrop")) { event.target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; } });
   restoreConnectionLabels();
   renderConnections();
   loadTokenLogo();
+  loadBotWallet();
 })();

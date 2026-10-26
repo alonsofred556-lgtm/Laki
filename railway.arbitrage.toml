@@ -1,0 +1,7 @@
+# Deploy as a separate private Railway worker.
+# It requests fresh Pangea quotes and persists paper decisions; it never signs or broadcasts.
+
+[deploy]
+startCommand = "python manage.py scan_arbitrage --loop-seconds 30"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

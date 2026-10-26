@@ -11,12 +11,17 @@ The canonical production backend is Django in `coni_backend/` and `core/`. `serv
 - `/api/withdrawals/request` validates and reserves an available ledger balance for a withdrawal request. It never signs or broadcasts; `/api/withdrawals/status/<withdrawal-id>` reports the state.
 - `/api/health` exposes a minimal liveness check.
 - `/api/auth/challenge`, `/api/auth/verify`, `/api/auth/session`, and `/api/auth/logout` implement nonce-based off-chain wallet authentication for EVM and Solana wallets. They do not authorize transactions.
+- `/api/bot-wallet` creates/reads five per-chain bot-wallet records plus PNL/trade history; `/api/bot-wallet/transfer` prepares top-up or withdrawal requests but requires an active audited signer-provisioned bot wallet and never broadcasts.
+- `/api/internal/signer/bot-wallet-attest` is a private signer callback. It binds only a public address, opaque HSM/MPC key reference, and attestation hash; it rejects private keys and must be reachable only through private networking/mTLS.
+- Private signer callbacks require a short-lived HMAC over the exact request body in production; a static secret header is available only for local development when `CONI_SIGNER_CALLBACK_REQUIRE_HMAC=false`.
 - `/api/bot/status`, `/api/bot/scan`, `/api/bot/profit`, and `/api/bot/pause` expose guarded operations. Operations routes require `x-coni-ops-token` where applicable.
+- `/api/profit/prepare-settlement` creates a pending USDG payout instruction only for a settled execution and the user's Robinhood Chain identity. It never signs or broadcasts.
 - `/api/fees/accrue` records fee liabilities in the ledger. It never sends a fee on-chain; the signer/treasury service must later sweep accrued balances.
 - `/api/execution/plan` creates a persisted quoted execution only after authentication. It returns a conflict while execution is gated and never accepts arbitrary calldata.
+- `python manage.py plan_arbitrage_executions` is an optional private worker. It re-quotes approved opportunities for each active and funded user bot wallet, then creates signer-gated execution plans; it never signs or broadcasts.
 - Static responses include restrictive security headers and a small request-body/rate limit.
 
-`core/models.py` and the generated migration define the durable wallet identity, double-entry ledger, funding intent, fee, bot-control, and execution tables. Run `python manage.py migrate` with `DATABASE_URL` before starting a production service. The `mcp/operations_server.py` process is a restricted operations MCP surface: it can inspect health, scan opportunities, inspect profit summaries, read fee configuration, and pause the bot, but it has no signing or withdrawal tool.
+`core/models.py` and the generated migrations define the durable wallet identity, per-chain bot-wallet, bot-isolated double-entry ledger, funding intent, fee, bot-control, opportunity, settlement, and execution tables. Run `python manage.py migrate` with `DATABASE_URL` before starting a production service. The `mcp/operations_server.py` process is a restricted operations MCP surface: it can inspect health, scan opportunities, inspect profit summaries, read fee configuration, and pause the bot, but it has no signing or withdrawal tool.
 
 Before accepting real funds, replace the in-memory rate limiter and cache with Redis, put the service behind a TLS-terminating reverse proxy, add structured audit logs, run the deposit verifier as a separate worker, add chain reconciliation and alerting, deploy a separate audited signer/treasury service for withdrawals, and complete an independent security review. Never put `CONI_FUNDING_RECIPIENTS`, `CONI_FEE_RECIPIENTS`, RPC credentials, or signer credentials in browser code.
 

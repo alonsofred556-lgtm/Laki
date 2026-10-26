@@ -1,0 +1,6 @@
+# Private worker: creates quote-bound plans only. It never signs or broadcasts.
+
+[deploy]
+startCommand = "python manage.py plan_arbitrage_executions --loop-seconds 30 --max-plans 10"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

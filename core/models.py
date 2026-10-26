@@ -27,9 +27,52 @@ class WalletIdentity(models.Model):
         constraints = [models.UniqueConstraint(fields=["chain", "address"], name="wallet_identity_chain_address")]
 
 
+class BotWallet(models.Model):
+    """Per-user bot-wallet identity; no private key is stored in Django."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(WalletIdentity, on_delete=models.PROTECT, related_name="bot_wallets", db_column="owner_id")
+    chain = models.CharField(max_length=32)
+    address = models.CharField(max_length=64, blank=True)
+    mode = models.CharField(max_length=24, default="external-bot")
+    custody = models.CharField(max_length=24, default="audited-signer")
+    status = models.CharField(max_length=32, default="awaiting-signer-provision")
+    source_address = models.CharField(max_length=64, blank=True)
+    signer_key_ref = models.CharField(max_length=128, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "bot_wallets"
+        constraints = [models.UniqueConstraint(fields=["owner", "chain", "mode"], name="bot_wallet_owner_chain_mode")]
+        indexes = [models.Index(fields=["owner", "status"], name="bot_wallet_owner_status")]
+
+
+class BotWalletTransfer(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    bot_wallet = models.ForeignKey(BotWallet, on_delete=models.PROTECT, related_name="transfers")
+    owner = models.ForeignKey(WalletIdentity, on_delete=models.PROTECT, db_column="owner_id")
+    direction = models.CharField(max_length=16)
+    asset = models.CharField(max_length=16)
+    chain = models.CharField(max_length=32)
+    amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    destination = models.CharField(max_length=64)
+    state = models.CharField(max_length=32, default="pending-approval")
+    tx_hash = models.CharField(max_length=160, blank=True)
+    failure_code = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "bot_wallet_transfers"
+        indexes = [models.Index(fields=["bot_wallet", "created_at"], name="bot_transfer_wallet_created")]
+
+
 class LedgerAccount(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     owner = models.ForeignKey(WalletIdentity, null=True, blank=True, on_delete=models.PROTECT, db_column="owner_id")
+    bot_wallet = models.ForeignKey("BotWallet", null=True, blank=True, on_delete=models.PROTECT, related_name="ledger_accounts")
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
     kind = models.CharField(max_length=32)
@@ -38,8 +81,9 @@ class LedgerAccount(models.Model):
     class Meta:
         db_table = "ledger_accounts"
         constraints = [
-            models.UniqueConstraint(fields=["owner", "asset", "chain", "kind"], name="ledger_account_owner_asset_chain_kind"),
-            models.UniqueConstraint(fields=["asset", "chain", "kind"], condition=models.Q(owner__isnull=True), name="ledger_system_account_asset_chain_kind"),
+            models.UniqueConstraint(fields=["owner", "asset", "chain", "kind"], condition=models.Q(bot_wallet__isnull=True, owner__isnull=False), name="ledger_user_asset_chain_kind"),
+            models.UniqueConstraint(fields=["bot_wallet", "asset", "kind"], condition=models.Q(bot_wallet__isnull=False), name="ledger_bot_asset_kind"),
+            models.UniqueConstraint(fields=["asset", "chain", "kind"], condition=models.Q(owner__isnull=True, bot_wallet__isnull=True), name="ledger_system_asset_chain_kind"),
         ]
 
 
@@ -61,6 +105,7 @@ class LedgerEntry(models.Model):
 class FundingIntent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     wallet_identity = models.ForeignKey(WalletIdentity, null=True, on_delete=models.PROTECT, db_column="wallet_identity_id")
+    bot_wallet = models.ForeignKey("BotWallet", null=True, blank=True, on_delete=models.PROTECT, related_name="funding_intents")
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
     amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
@@ -212,14 +257,117 @@ class BotControl(models.Model):
 class Execution(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_identity = models.ForeignKey(WalletIdentity, null=True, on_delete=models.PROTECT, db_column="user_identity_id")
+    bot_wallet = models.ForeignKey(BotWallet, null=True, blank=True, on_delete=models.PROTECT, related_name="executions")
+    opportunity = models.ForeignKey("ArbitrageOpportunity", null=True, blank=True, on_delete=models.PROTECT, related_name="executions")
     slug = models.CharField(max_length=80)
     state = models.CharField(max_length=32)
     expected_net_bps = models.IntegerField(null=True, blank=True)
     expected_profit_usd = models.DecimalField(max_digits=30, decimal_places=8, null=True, blank=True)
+    realized_profit_usd = models.DecimalField(max_digits=30, decimal_places=8, null=True, blank=True)
+    realized_at = models.DateTimeField(null=True, blank=True)
     quote_hash = models.CharField(max_length=128, null=True, blank=True)
+    quote_artifact = models.JSONField(default=dict)
     error_code = models.CharField(max_length=64, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "executions"
+        constraints = [models.UniqueConstraint(fields=["opportunity", "user_identity"], condition=models.Q(opportunity__isnull=False), name="execution_user_opportunity_once")]
+
+
+class ExecutionLeg(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.ForeignKey(Execution, on_delete=models.PROTECT, related_name="legs")
+    kind = models.CharField(max_length=16)
+    chain = models.CharField(max_length=64)
+    state = models.CharField(max_length=32, default="awaiting-signer")
+    quote_hash = models.CharField(max_length=128, blank=True)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    bridge_guid = models.CharField(max_length=128, blank=True)
+    amount_in_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
+    amount_out_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "execution_legs"
+        constraints = [models.UniqueConstraint(fields=["execution", "kind"], name="execution_leg_kind_once")]
+        indexes = [models.Index(fields=["execution", "state"], name="execution_leg_state")]
+
+
+class ExecutionEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    execution = models.ForeignKey(Execution, on_delete=models.PROTECT, related_name="events")
+    leg = models.ForeignKey(ExecutionLeg, null=True, blank=True, on_delete=models.PROTECT, related_name="events")
+    event = models.CharField(max_length=32)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    bridge_guid = models.CharField(max_length=128, blank=True)
+    realized_profit_usd = models.DecimalField(max_digits=30, decimal_places=8, null=True, blank=True)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "execution_events"
+        indexes = [models.Index(fields=["execution", "created_at"], name="execution_event_created")]
+
+
+class ArbitrageOpportunity(models.Model):
+    """Immutable-ish decision snapshot produced by the opportunity scanner.
+
+    This is deliberately separate from Execution: an opportunity can be
+    rejected, expire, or be used for paper simulation without ever becoming
+    an instruction for a signer.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dedupe_key = models.CharField(max_length=180, unique=True)
+    slug = models.CharField(max_length=96)
+    symbol = models.CharField(max_length=32)
+    buy_chain = models.CharField(max_length=32)
+    sell_chain = models.CharField(max_length=32)
+    buy_token = models.CharField(max_length=128, null=True, blank=True)
+    sell_token = models.CharField(max_length=128, null=True, blank=True)
+    notional_usd = models.DecimalField(max_digits=30, decimal_places=8)
+    gross_profit_usd = models.DecimalField(max_digits=30, decimal_places=8, default=0)
+    total_cost_usd = models.DecimalField(max_digits=30, decimal_places=8, default=0)
+    net_profit_usd = models.DecimalField(max_digits=30, decimal_places=8, default=0)
+    net_bps = models.IntegerField(default=0)
+    state = models.CharField(max_length=32, default="detected")
+    quote_hash = models.CharField(max_length=128, null=True, blank=True)
+    decision = models.JSONField(default=dict)
+    detected_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "arbitrage_opportunities"
+        indexes = [
+            models.Index(fields=["slug", "detected_at"], name="arb_slug_detected"),
+            models.Index(fields=["state", "detected_at"], name="arb_state_detected"),
+        ]
+
+
+class ProfitSettlement(models.Model):
+    """A realized-profit payout instruction; it is not a withdrawal shortcut."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.OneToOneField(Execution, on_delete=models.PROTECT, related_name="profit_settlement")
+    user_identity = models.ForeignKey(WalletIdentity, on_delete=models.PROTECT, db_column="user_identity_id")
+    realized_profit_usd = models.DecimalField(max_digits=30, decimal_places=8)
+    settlement_asset = models.CharField(max_length=16, default="USDG")
+    settlement_chain = models.CharField(max_length=32, default="robinhood")
+    settlement_token = models.CharField(max_length=128)
+    settlement_price_usd = models.DecimalField(max_digits=30, decimal_places=12)
+    amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    recipient = models.CharField(max_length=64)
+    state = models.CharField(max_length=32, default="pending-approval")
+    quote_hash = models.CharField(max_length=128, null=True, blank=True)
+    tx_hash = models.CharField(max_length=160, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    settled_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "profit_settlements"
+        indexes = [models.Index(fields=["state", "created_at"], name="profit_state_created")]

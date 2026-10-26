@@ -4,16 +4,19 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
-from .models import DepositObservation, FundingIntent, LedgerAccount, LedgerEntry, WithdrawalRequest
+from .models import BotWallet, DepositObservation, FundingIntent, LedgerAccount, LedgerEntry, WithdrawalRequest
 
 
 class InsufficientBalance(Exception):
     pass
 
 
-def account_for(identity, asset, chain, kind):
+def account_for(identity, asset, chain, kind, *, bot_wallet=None):
+    if bot_wallet is not None and bot_wallet.owner_id != getattr(identity, "id", None):
+        raise ValueError("bot wallet owner mismatch")
     account, _ = LedgerAccount.objects.get_or_create(
         owner=identity,
+        bot_wallet=bot_wallet,
         asset=asset,
         chain=chain,
         kind=kind,
@@ -41,8 +44,26 @@ def credit_confirmed_deposit(observation_id):
             observation.rejection_code = "intent-already-credited"
             observation.save(update_fields=["status", "rejection_code"])
             return observation
+        if intent.bot_wallet_id:
+            bot_wallet = BotWallet.objects.filter(id=intent.bot_wallet_id).first()
+            if (
+                not bot_wallet
+                or bot_wallet.owner_id != observation.wallet_identity_id
+                or bot_wallet.chain != observation.chain
+                or bot_wallet.status != "active"
+                or not bot_wallet.address
+                or bot_wallet.address.lower() != observation.destination.lower()
+            ):
+                raise ValueError("bot wallet funding destination is not an active attested wallet")
 
-    user_account = account_for(observation.wallet_identity, observation.asset, observation.chain, "available")
+    account_kind = "bot-available" if observation.funding_intent and observation.funding_intent.bot_wallet_id else "available"
+    user_account = account_for(
+        observation.wallet_identity,
+        observation.asset,
+        observation.chain,
+        account_kind,
+        bot_wallet=observation.funding_intent.bot_wallet if account_kind == "bot-available" else None,
+    )
     user_account = LedgerAccount.objects.select_for_update().get(id=user_account.id)
     treasury_account = account_for(None, observation.asset, observation.chain, "onchain-receivable")
     treasury_account = LedgerAccount.objects.select_for_update().get(id=treasury_account.id)

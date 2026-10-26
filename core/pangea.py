@@ -14,7 +14,10 @@ class PangeaError(RuntimeError):
 
 def request_json(path: str, method: str = "GET", payload: dict | None = None):
     url = f"{settings.PANGEA_API}{path}"
-    response = requests.request(method, url, json=payload, headers={"Accept": "application/json", "User-Agent": "ConiDjango/0.1"}, timeout=10)
+    try:
+        response = requests.request(method, url, json=payload, headers={"Accept": "application/json", "User-Agent": "ConiDjango/0.1"}, timeout=10)
+    except requests.RequestException as exc:
+        raise PangeaError("Pangea request failed; retryable upstream outage") from exc
     try:
         data = response.json()
     except ValueError as exc:
@@ -25,18 +28,9 @@ def request_json(path: str, method: str = "GET", payload: dict | None = None):
 
 
 def scan_opportunities():
-    data = request_json("/pools")
-    result = []
-    for launch in data.get("launches", []):
-        pools = [pool for pool in launch.get("pools", []) if float(pool.get("priceUsd") or 0) > 0]
-        if len(pools) < 2:
-            continue
-        buy = min(pools, key=lambda item: float(item["priceUsd"]))
-        sell = max(pools, key=lambda item: float(item["priceUsd"]))
-        gross_bps = int(((float(sell["priceUsd"]) - float(buy["priceUsd"])) / float(buy["priceUsd"])) * 10_000)
-        net_bps = gross_bps - settings.CONI_DEFAULT_COST_BUFFER_BPS
-        result.append({"slug": launch.get("slug"), "name": launch.get("name"), "symbol": launch.get("symbol"), "image": launch.get("image"), "buyChain": buy.get("chain"), "sellChain": sell.get("chain"), "grossBps": gross_bps, "netBps": net_bps, "depthUsd": min(float(buy.get("depth") or 0), float(sell.get("depth") or 0)), "executable": net_bps > 0})
-    return sorted(result, key=lambda item: item["netBps"], reverse=True)[:100]
+    # Kept as the compatibility import used by views and the legacy proxy.
+    from .arbitrage import scan_opportunities as quote_aware_scan
+    return quote_aware_scan()
 
 
 def _image_url(image):

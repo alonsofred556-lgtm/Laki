@@ -188,16 +188,35 @@ def _verify_solana(observation):
     if transaction_data.get("meta", {}).get("err") is not None:
         raise VerificationError("Solana transaction failed")
     matches = []
-    for instruction in _solana_instructions(transaction_data):
+    raw_event = observation.raw_event or {}
+    expected_spl = raw_event.get("type") == "solana-spl-transfer"
+    instructions = _solana_instructions(transaction_data)
+    message = ((transaction_data.get("transaction") or {}).get("message") or {})
+    account_keys = []
+    for key in message.get("accountKeys") or []:
+        account_keys.append(key.get("pubkey") if isinstance(key, dict) else key)
+    post_balances = {}
+    for item in transaction_data.get("meta", {}).get("postTokenBalances") or []:
+        index = item.get("accountIndex")
+        if isinstance(index, int) and index < len(account_keys):
+            post_balances[account_keys[index]] = item
+    for index, instruction in enumerate(instructions):
         parsed = instruction.get("parsed") or {}
         info = parsed.get("info") or {}
-        if parsed.get("type") == "transfer" and parsed.get("program") == "system":
+        if not expected_spl and parsed.get("type") == "transfer" and parsed.get("program") == "system":
             if info.get("source") == observation.sender and info.get("destination") == observation.destination and int(info.get("lamports", 0)) == int(observation.amount_base_units):
                 matches.append(info)
-    if not matches or observation.event_index >= len(matches):
+        if expected_spl and index == observation.event_index and parsed.get("type") in {"transfer", "transferChecked"} and str(parsed.get("program") or instruction.get("program") or "").lower() in {"spl-token", "spl-token-2022", "spltoken"}:
+            destination = info.get("destination")
+            balance = post_balances.get(destination) or {}
+            amount_info = info.get("tokenAmount") or {}
+            amount = amount_info.get("amount") or info.get("amount")
+            if destination == raw_event.get("tokenAccount") and balance.get("owner") == observation.destination and balance.get("mint") == raw_event.get("mint") and (not raw_event.get("tokenProgram") or balance.get("programId") == raw_event.get("tokenProgram")) and (info.get("authority") or info.get("owner")) == observation.sender and int(amount or 0) == int(observation.amount_base_units):
+                matches.append(info)
+    if not matches or (not expected_spl and observation.event_index >= len(matches)):
         raise VerificationError("Solana transfer does not match funding intent")
     block_time = transaction_data.get("blockTime")
-    raw = {"slot": transaction_data.get("slot"), "lamports": str(matches[observation.event_index].get("lamports"))}
+    raw = {**raw_event, "slot": transaction_data.get("slot"), "amount": str((matches[0].get("lamports") if not expected_spl else (matches[0].get("tokenAmount") or {}).get("amount") or matches[0].get("amount")))}
     confirmed_at = datetime.fromtimestamp(block_time, tz=datetime_timezone.utc) if isinstance(block_time, int) else timezone.now()
     with transaction.atomic():
         current = DepositObservation.objects.select_for_update().get(id=observation.id)
