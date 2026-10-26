@@ -439,6 +439,86 @@
     return { version: 1, chain, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
   }
 
+  function readLocalVault() {
+    try {
+      const vault = JSON.parse(localStorage.getItem("coni.internal.vault.v1") || "null");
+      if (!vault || vault.version !== 1 || !["evm", "solana"].includes(vault.chain) || vault.algorithm !== "PBKDF2-AES-GCM") return null;
+      if (![vault.salt, vault.iv, vault.ciphertext].every((value) => typeof value === "string" && value.length > 0)) return null;
+      return vault;
+    } catch {
+      return null;
+    }
+  }
+
+  async function decryptLocalSecret(vault, password) {
+    const decode = (value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
+    const encoder = new TextEncoder();
+    const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
+    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: decode(vault.salt), iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(vault.iv) }, key, decode(vault.ciphertext));
+    return new TextDecoder().decode(plaintext);
+  }
+
+  function renderLocalVaultTools() {
+    const vault = readLocalVault();
+    const tools = $("#local-vault-tools");
+    const verify = $("#verify-local-vault");
+    const status = $("#local-vault-status");
+    if (!tools || !verify || !status) return;
+    tools.hidden = !vault;
+    verify.hidden = !vault;
+    if (!vault) {
+      status.textContent = "No encrypted local backup stored in this browser.";
+      return;
+    }
+    $("#existing-wallet-chain").value = vault.chain;
+    const created = vault.createdAt ? new Date(vault.createdAt).toLocaleString() : "unknown time";
+    status.textContent = `Encrypted ${vault.chain === "solana" ? "Solana" : "EVM"} backup present · created ${created}`;
+  }
+
+  async function verifyLocalVault() {
+    const vault = readLocalVault();
+    const passwordField = $("#existing-wallet-password");
+    const status = $("#local-vault-status");
+    if (!vault) { renderLocalVaultTools(); return; }
+    const password = passwordField.value;
+    if (password.length < 12) {
+      status.textContent = "Enter the local backup password (at least 12 characters) to verify it.";
+      return;
+    }
+    let secret = "";
+    try {
+      secret = await decryptLocalSecret(vault, password);
+      status.textContent = "Local password verified; the decrypted secret never left this browser.";
+    } catch {
+      status.textContent = "Password or encrypted backup is invalid. Nothing was sent to Coni.";
+    } finally {
+      secret = "";
+      passwordField.value = "";
+    }
+  }
+
+  function exportLocalVault() {
+    const vault = readLocalVault();
+    if (!vault) { renderLocalVaultTools(); return; }
+    const blob = new Blob([JSON.stringify(vault, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `coni-encrypted-wallet-backup-${vault.chain}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    $("#local-vault-status").textContent = "Encrypted backup exported. It contains ciphertext only; protect the file and password separately.";
+  }
+
+  function deleteLocalVault() {
+    if (!readLocalVault()) { renderLocalVaultTools(); return; }
+    if (!window.confirm("Delete this encrypted local backup from this browser? This does not affect any on-chain wallet or bot wallet.")) return;
+    localStorage.removeItem("coni.internal.vault.v1");
+    renderLocalVaultTools();
+    $("#local-vault-status").textContent = "Encrypted local backup deleted from this browser.";
+  }
+
   function validLocalSecret(chain, secret) {
     if (chain === "evm") return /^0x[a-fA-F0-9]{64}$/.test(secret);
     if (/^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(secret)) return true;
@@ -456,11 +536,13 @@
       $("#vault-action-status").textContent = chain === "solana" ? "Enter a valid Solana base58 secret or 64-byte JSON array and a password of at least 12 characters. The secret remains in this browser and is never posted." : "Enter a valid EVM private key and a password of at least 12 characters. The key remains in this browser and is never posted.";
       return;
     }
+    if (readLocalVault() && !window.confirm("Replace the existing encrypted local backup? The old backup will be overwritten.")) return;
     const vault = await encryptLocalSecret(privateKey, password, chain);
     localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
     $("#existing-private-key").value = "";
     $("#existing-wallet-password").value = "";
     $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} local backup created. It is not a live bot signer until an audited wallet SDK and signer policy are connected.`;
+    renderLocalVaultTools();
   }
 
   async function createInternalWallet() {
@@ -528,6 +610,9 @@
   $("#bot-withdraw").addEventListener("click", requestBotWithdrawal);
   $("#submit-bot-withdrawal").addEventListener("click", () => submitBotWithdrawal().catch((error) => { $("#funding-status").textContent = error?.message || "Bot withdrawal could not be requested."; }));
   $("#import-local-wallet").addEventListener("click", () => importLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local encryption failed; no key was uploaded."; }));
+  $("#verify-local-vault")?.addEventListener("click", () => verifyLocalVault().catch(() => { $("#local-vault-status").textContent = "Local backup verification failed; no secret was uploaded."; }));
+  $("#export-local-vault")?.addEventListener("click", exportLocalVault);
+  $("#delete-local-vault")?.addEventListener("click", deleteLocalVault);
   $("#create-internal-wallet").addEventListener("click", createInternalWallet);
   document.addEventListener("click", (event) => {
     const claim = event.target.closest("[data-claim-observation]");
@@ -553,6 +638,7 @@
   }));
   document.addEventListener("click", (event) => { if (event.target.matches("[data-close-modal]") || event.target.classList.contains("modal-backdrop")) { event.target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; } });
   renderProviderChoices();
+  renderLocalVaultTools();
   restoreConnectionLabels();
   renderConnections();
   loadTokenLogo();
