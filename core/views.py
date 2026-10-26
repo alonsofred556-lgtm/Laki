@@ -1142,9 +1142,13 @@ def signer_execution_intent(request):
         allowed = {"executionId", "idempotencyKey"}
         if set(data) - allowed or not data.get("executionId") or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
             return error("invalid signer intent request", 400, request)
-        execution = Execution.objects.filter(id=data["executionId"]).first()
+        execution = Execution.objects.select_related("bot_wallet", "sell_bot_wallet", "opportunity").filter(id=data["executionId"]).first()
         if not execution:
             return error("execution not found", 404, request)
+        # Validate the quote and both custody wallets before recording the
+        # signer-requested transition. A stale or revoked plan must remain
+        # untouched for reconciliation rather than becoming handoff-ready.
+        signer_intent_payload(execution)
         if execution.state == "planned":
             execution = record_execution_event(
                 execution_id=execution.id,

@@ -7,12 +7,24 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .execution import _quote_hash, next_execution_state
+from .execution import _quote_hash, next_execution_state, signer_wallets_ready
 from .bot_wallets import next_bot_transfer_state
 from .profit_settlement import next_settlement_state
 
 
 class ExecutionLifecycleTests(SimpleTestCase):
+    def test_signer_handoff_requires_both_active_attested_wallets(self):
+        wallet = type("Wallet", (), {"status": "active", "address": "0xabc", "signer_key_ref": "hsm/key-1"})()
+        execution = type("Execution", (), {"bot_wallet": wallet, "sell_bot_wallet": wallet})()
+        self.assertTrue(signer_wallets_ready(execution))
+        wallet.signer_key_ref = ""
+        self.assertFalse(signer_wallets_ready(execution))
+
+    def test_signer_handoff_rejects_revoked_wallet(self):
+        wallet = type("Wallet", (), {"status": "revoked", "address": "0xabc", "signer_key_ref": "hsm/key-1"})()
+        execution = type("Execution", (), {"bot_wallet": wallet, "sell_bot_wallet": wallet})()
+        self.assertFalse(signer_wallets_ready(execution))
+
     def test_happy_path_is_strictly_ordered(self):
         state = "planned"
         for event, expected in (

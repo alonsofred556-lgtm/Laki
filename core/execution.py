@@ -136,11 +136,27 @@ def execution_payload(execution):
     }
 
 
+def signer_wallets_ready(execution):
+    """Require both route wallets to remain attested and active at handoff time."""
+    wallets = (getattr(execution, "bot_wallet", None), getattr(execution, "sell_bot_wallet", None))
+    return all(
+        wallet
+        and wallet.status == "active"
+        and bool(wallet.address)
+        and bool(wallet.signer_key_ref)
+        for wallet in wallets
+    )
+
+
 def signer_intent_payload(execution):
     """Return the private signer handoff for one hash-bound execution plan."""
     execution = Execution.objects.select_related("bot_wallet", "sell_bot_wallet", "opportunity").prefetch_related("legs").get(id=execution.id)
     if execution.state not in {"planned", "awaiting-signer"}:
         raise ValueError("execution is not awaiting signer handoff")
+    if not execution.opportunity or not execution.opportunity.expires_at or execution.opportunity.expires_at <= timezone.now():
+        raise ValueError("execution opportunity quote has expired")
+    if not signer_wallets_ready(execution):
+        raise ValueError("execution bot wallets are not currently attested and active")
     if not execution.quote_hash or not isinstance(execution.quote_artifact, dict) or not execution.quote_artifact.get("trade") or not execution.quote_artifact.get("bridge"):
         raise ValueError("execution quote artifact is incomplete")
     artifact_hash = _quote_hash({"trade": execution.quote_artifact["trade"], "bridge": execution.quote_artifact["bridge"]})
