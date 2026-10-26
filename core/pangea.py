@@ -15,7 +15,16 @@ class PangeaError(RuntimeError):
 def request_json(path: str, method: str = "GET", payload: dict | None = None):
     url = f"{settings.PANGEA_API}{path}"
     try:
-        response = requests.request(method, url, json=payload, headers={"Accept": "application/json", "User-Agent": "ConiDjango/0.1"}, timeout=10)
+        response = requests.request(
+            method,
+            url,
+            json=payload,
+            headers={"Accept": "application/json", "User-Agent": "ConiDjango/0.1"},
+            timeout=(
+                settings.CONI_PANGEA_CONNECT_TIMEOUT_SECONDS,
+                settings.CONI_PANGEA_READ_TIMEOUT_SECONDS,
+            ),
+        )
     except requests.RequestException as exc:
         raise PangeaError("Pangea request failed; retryable upstream outage") from exc
     try:
@@ -77,7 +86,17 @@ def token_registry_snapshot():
     cached = cache.get("coni:pangea:tokens")
     if cached:
         return cached
-    pools = request_json("/pools")
+    stale_key = "coni:pangea:tokens:stale"
+    stale = cache.get(stale_key)
+    try:
+        pools = request_json("/pools")
+    except PangeaError:
+        # A public market read should continue serving the last known-good
+        # snapshot during an upstream outage. It is explicitly stale data;
+        # trading workers still request fresh quotes and apply their own gates.
+        if stale:
+            return stale
+        raise
     launches = {item.get("slug"): item for item in _launch_items(pools) if item.get("slug")}
     try:
         launch_feed = request_json("/v1/launches?limit=100")
@@ -109,4 +128,5 @@ def token_registry_snapshot():
         })
     result.sort(key=lambda item: item["symbol"])
     cache.set("coni:pangea:tokens", result, 45)
+    cache.set(stale_key, result, 3600)
     return result

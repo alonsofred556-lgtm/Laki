@@ -134,6 +134,29 @@ CONI_DEPOSIT_SCAN_BATCH = int(os.environ.get("CONI_DEPOSIT_SCAN_BATCH", "50"))
 CONI_DEPOSIT_SCAN_LOOKBACK_BLOCKS = int(os.environ.get("CONI_DEPOSIT_SCAN_LOOKBACK_BLOCKS", "2000"))
 CONI_REDIS_URL = os.environ.get("CONI_REDIS_URL", "")
 CONI_REDIS_REQUIRED = os.environ.get("CONI_REDIS_REQUIRED", "true" if not DEBUG else "false").lower() == "true"
+
+# Use the same Redis service for Django's shared cache when it is configured.
+# A process-local cache is acceptable only for local development; Gunicorn
+# workers otherwise do not share Pangea snapshots or token logo results.
+if CONI_REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": CONI_REDIS_URL,
+            "OPTIONS": {
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+            },
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "coni-local-cache",
+        }
+    }
+
 CONI_AUDIT_HASH_KEY = os.environ.get("CONI_AUDIT_HASH_KEY", "")
 CONI_ARBITRAGE_NOTIONAL_USD = os.environ.get("CONI_ARBITRAGE_NOTIONAL_USD", "10")
 CONI_ARBITRAGE_MIN_NET_BPS = int(os.environ.get("CONI_ARBITRAGE_MIN_NET_BPS", "100"))
@@ -154,4 +177,6 @@ CONI_PROFIT_SETTLEMENT_DECIMALS = int(_profit_decimals) if _profit_decimals.isdi
 CONI_PROFIT_SETTLEMENT_ENABLED = os.environ.get("CONI_PROFIT_SETTLEMENT_ENABLED", "false").lower() == "true"
 
 PANGEA_API = "https://www.pangea.trade/api"
+CONI_PANGEA_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("CONI_PANGEA_CONNECT_TIMEOUT_SECONDS", "3.05"))
+CONI_PANGEA_READ_TIMEOUT_SECONDS = float(os.environ.get("CONI_PANGEA_READ_TIMEOUT_SECONDS", "6"))
 LAYERZERO_ENDPOINT_IDS = {"ethereum": 30101, "base": 30184, "robinhood": 30416, "bsc": 30102, "solana": 30168}

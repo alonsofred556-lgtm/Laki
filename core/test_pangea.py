@@ -9,7 +9,7 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .pangea import token_registry_snapshot
+from .pangea import PangeaError, token_registry_snapshot
 
 
 class PangeaTokenFeedTests(SimpleTestCase):
@@ -31,3 +31,11 @@ class PangeaTokenFeedTests(SimpleTestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(request.call_count, 2)
         self.assertFalse(any("/token/meta" in str(call) for call in request.call_args_list))
+
+    def test_token_snapshot_serves_last_known_good_data_on_pangea_outage(self):
+        stale = [{"slug": "cached", "symbol": "CACHED", "name": "Cached", "pools": []}]
+        cache.set("coni:pangea:tokens:stale", stale, 3600)
+        with patch("core.pangea.request_json", side_effect=PangeaError("upstream timeout")):
+            result = token_registry_snapshot()
+
+        self.assertEqual(result, stale)

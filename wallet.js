@@ -7,9 +7,23 @@
   let botFundingMode = false;
   let preferredBotMode = localStorage.getItem("coni.bot-wallet.mode.v1") || "external-bot";
   const STORAGE_KEY = "coni.wallet.connections.v1";
+  const EVM_PROVIDER_KEY = "coni.wallet.evm-provider.v1";
+  const SOLANA_PROVIDER_KEY = "coni.wallet.solana-provider.v1";
+  const announcedEvmProviders = new Map();
   const $ = (selector) => document.querySelector(selector);
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
   const chainNames = { 1: "Ethereum", 8453: "Base", 4663: "Robinhood Chain", 56: "BNB Chain" };
+
+  // EIP-6963 allows multiple injected wallets to coexist without silently
+  // selecting whichever provider happened to win window.ethereum.
+  window.addEventListener("eip6963:announceProvider", (event) => {
+    const info = event.detail?.info;
+    const provider = event.detail?.provider;
+    if (!provider || !info?.uuid) return;
+    announcedEvmProviders.set(info.uuid, { info, provider });
+    renderProviderChoices();
+  });
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
 
   function message(text, tone = "") {
     const node = $("#wallet-message");
@@ -17,13 +31,70 @@
     node.dataset.tone = tone;
   }
 
-  function providerForEvm() {
+  function legacyEvmProviders() {
     const providers = Array.isArray(window.ethereum?.providers) ? window.ethereum.providers : [window.ethereum].filter(Boolean);
-    return window.okxwallet?.ethereum || window.safepalProvider || window.phantom?.ethereum || providers.find((provider) => provider.isOkxWallet) || providers.find((provider) => provider.isSafePal) || providers[0] || null;
+    return [
+      ["OKX Wallet", window.okxwallet?.ethereum],
+      ["SafePal", window.safepalProvider],
+      ["Phantom", window.phantom?.ethereum],
+      ...providers.map((provider) => [providerLabel(provider), provider]),
+    ].filter(([, provider], index, items) => provider && items.findIndex(([, candidate]) => candidate === provider) === index)
+      .map(([name, provider], index) => ({ key: `legacy-${index}`, name, provider }));
+  }
+
+  function evmProviderOptions() {
+    const announced = [...announcedEvmProviders.entries()].map(([key, value]) => ({ key, name: value.info.name || "EVM wallet", provider: value.provider }));
+    const options = [...announced, ...legacyEvmProviders()];
+    return options.filter((item, index) => options.findIndex((candidate) => candidate.provider === item.provider) === index);
+  }
+
+  function solanaProviderOptions() {
+    const candidates = [
+      ["Phantom", window.phantom?.solana],
+      ["OKX Wallet", window.okxwallet?.solana],
+      ["SafePal", window.safepalwallet?.solana],
+      ["Solflare", window.solflare],
+      ["Backpack", window.backpack?.solana],
+      ["Solana wallet", window.solana],
+    ];
+    return candidates.filter(([, provider], index, items) => provider && items.findIndex(([, candidate]) => candidate === provider) === index)
+      .map(([name, provider], index) => ({ key: `solana-${index}`, name, provider }));
+  }
+
+  function setProviderOptions(selector, options, storageKey, label) {
+    const select = $(selector);
+    if (!select) return;
+    const current = localStorage.getItem(storageKey) || "";
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = `Choose ${label}`;
+    select.appendChild(placeholder);
+    options.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.key;
+      option.textContent = item.name;
+      select.appendChild(option);
+    });
+    select.value = options.some((item) => item.key === current) ? current : (options.length === 1 ? options[0].key : "");
+    select.hidden = options.length < 2;
+  }
+
+  function renderProviderChoices() {
+    setProviderOptions("#evm-wallet-choice", evmProviderOptions(), EVM_PROVIDER_KEY, "EVM wallet");
+    setProviderOptions("#solana-wallet-choice", solanaProviderOptions(), SOLANA_PROVIDER_KEY, "Solana wallet");
+  }
+
+  function providerForEvm() {
+    const options = evmProviderOptions();
+    const selected = localStorage.getItem(EVM_PROVIDER_KEY);
+    return options.find((item) => item.key === selected)?.provider || options[0]?.provider || null;
   }
 
   function providerForSolana() {
-    return window.phantom?.solana || window.okxwallet?.solana || window.safepalwallet?.solana || window.solflare || window.backpack?.solana || window.solana || null;
+    const options = solanaProviderOptions();
+    const selected = localStorage.getItem(SOLANA_PROVIDER_KEY);
+    return options.find((item) => item.key === selected)?.provider || options[0]?.provider || null;
   }
 
   function providerLabel(provider, isSolana = false) {
@@ -391,6 +462,12 @@
 
   $("#connect-evm").addEventListener("click", connectEvm);
   $("#connect-solana").addEventListener("click", connectSolana);
+  $("#evm-wallet-choice")?.addEventListener("change", (event) => {
+    if (event.target.value) localStorage.setItem(EVM_PROVIDER_KEY, event.target.value);
+  });
+  $("#solana-wallet-choice")?.addEventListener("change", (event) => {
+    if (event.target.value) localStorage.setItem(SOLANA_PROVIDER_KEY, event.target.value);
+  });
   $("#prepare-funding").addEventListener("click", prepareFunding);
   $("#approve-funding").addEventListener("click", () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; }));
   $("#claim-funding").addEventListener("click", submitFundingClaim);
@@ -423,8 +500,13 @@
     $("#new-wallet-panel").hidden = button.dataset.walletMode !== "new";
   }));
   document.addEventListener("click", (event) => { if (event.target.matches("[data-close-modal]") || event.target.classList.contains("modal-backdrop")) { event.target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; } });
+  renderProviderChoices();
   restoreConnectionLabels();
   renderConnections();
   loadTokenLogo();
   loadBotWallet();
+  const requestedConnect = new URLSearchParams(window.location.search).get("connect");
+  if (requestedConnect === "evm" || requestedConnect === "solana") {
+    window.setTimeout(() => (requestedConnect === "evm" ? connectEvm() : connectSolana()), 0);
+  }
 })();

@@ -217,7 +217,11 @@
     if (event.target.classList.contains("modal-backdrop")) closeModal(event.target);
     if (event.target.closest("#wallet-button, #vault-connect")) openModal("#wallet-modal");
     const provider = event.target.closest("[data-connect-provider]");
-    if (provider) { $("#wallet-label").textContent = "Connected wallet"; closeModal(provider); }
+    if (provider) {
+      closeModal(provider);
+      const chain = provider.dataset.connectChain;
+      if (chain) window.location.href = `wallet.html?connect=${encodeURIComponent(chain)}`;
+    }
     if (event.target.closest("#prepare-route")) prepareRoute(event.target.closest("#prepare-route"));
   });
   $("#refresh-button").addEventListener("click", load);
