@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
@@ -10,7 +11,25 @@ if not SECRET_KEY:
     else:
         raise RuntimeError("DJANGO_SECRET_KEY must be set when DJANGO_DEBUG=false")
 
-ALLOWED_HOSTS = [host.strip() for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if host.strip()]
+def _normalise_host(value):
+    value = value.strip()
+    if not value:
+        return ""
+    if "://" in value:
+        value = urlsplit(value).hostname or ""
+    return value.split("/", 1)[0].strip()
+
+
+configured_hosts = {
+    host
+    for host in (_normalise_host(item) for item in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(","))
+    if host
+}
+ALLOWED_HOSTS = sorted(configured_hosts | {
+    "127.0.0.1",
+    "localhost",
+    "laki-production.up.railway.app",
+})
 ROOT_URLCONF = "coni_backend.urls"
 WSGI_APPLICATION = "coni_backend.wsgi.application"
 ASGI_APPLICATION = "coni_backend.asgi.application"
