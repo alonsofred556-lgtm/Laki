@@ -13,6 +13,7 @@
   const announcedEvmProviders = new Map();
   const pangeaTokens = new Map();
   let pangeaTokensLoadedAt = 0;
+  const solanaProviderHandlers = new WeakMap();
   const $ = (selector) => document.querySelector(selector);
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
   const chainNames = { 1: "Ethereum", 8453: "Base", 4663: "Robinhood Chain", 56: "BNB Chain" };
@@ -230,6 +231,60 @@
     }
   }
 
+  async function establishSolanaSession(provider, address) {
+    if (!address || !provider.signMessage) throw new Error("This Solana wallet does not expose off-chain message signing");
+    let balance = "Connected";
+    try {
+      const rpc = await fetch("https://api.mainnet-beta.solana.com", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }) });
+      const json = await rpc.json();
+      balance = `${((json.result?.value || 0) / 1e9).toFixed(5)} SOL`;
+    } catch { /* balance stays connected when the public RPC is unavailable */ }
+    await authenticateWallet("solana", address, async (messageText) => {
+      const signed = await provider.signMessage(new TextEncoder().encode(messageText), "utf8");
+      const bytes = signed.signature || signed;
+      return btoa(String.fromCharCode(...bytes));
+    });
+    preferredBotMode = "external-bot";
+    localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+    state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
+    saveConnections();
+    renderConnections();
+    loadBotWallet();
+  }
+
+  async function handleSolanaAccountChanged(provider, publicKey) {
+    const address = publicKey?.toString?.() || "";
+    if (address && state.solana?.address === address && state.solana.authenticated) return;
+    state.solana = null;
+    botWalletSnapshot = null;
+    activeBotWallet = null;
+    saveConnections();
+    renderConnections();
+    $("#bot-wallet-state").textContent = "CONNECT FIRST";
+    $("#bot-wallet-content").querySelector("p").textContent = "Reconnect and sign in with the active Solana account to view its bot wallet.";
+    try {
+      await fetch(`${config.apiBaseUrl}/api/auth/logout`, { method: "POST", credentials: "include" });
+    } catch { /* the new signature still cannot authenticate the old identity */ }
+    if (!address) {
+      message("Solana wallet disconnected.", "success");
+      return;
+    }
+    try {
+      message("Wallet account changed. Approve a new ownership signature…");
+      await establishSolanaSession(provider, address);
+      message("Solana wallet re-authenticated.", "success");
+    } catch (error) {
+      message(error?.message || "The new Solana account could not be authenticated.", "error");
+    }
+  }
+
+  function bindSolanaProvider(provider) {
+    if (!provider?.on || solanaProviderHandlers.has(provider)) return;
+    const handler = (publicKey) => handleSolanaAccountChanged(provider, publicKey);
+    solanaProviderHandlers.set(provider, handler);
+    provider.on("accountChanged", handler);
+  }
+
   async function connectSolana() {
     const provider = providerForSolana();
     if (!provider?.connect) {
@@ -240,26 +295,9 @@
       message("Waiting for Solana wallet approval…");
       const response = await provider.connect();
       const address = response.publicKey?.toString?.() || provider.publicKey?.toString?.();
-      let balance = "Connected";
-      try {
-        const rpc = await fetch("https://api.mainnet-beta.solana.com", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }) });
-        const json = await rpc.json();
-        balance = `${((json.result?.value || 0) / 1e9).toFixed(5)} SOL`;
-      } catch { /* balance stays connected when the public RPC is unavailable */ }
-      if (!provider.signMessage) throw new Error("This Solana wallet does not expose off-chain message signing");
-      await authenticateWallet("solana", address, async (messageText) => {
-        const signed = await provider.signMessage(new TextEncoder().encode(messageText), "utf8");
-        const bytes = signed.signature || signed;
-        return btoa(String.fromCharCode(...bytes));
-      });
-      preferredBotMode = "external-bot";
-      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
-      state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
-      saveConnections();
-      renderConnections();
+      await establishSolanaSession(provider, address);
+      bindSolanaProvider(provider);
       message("Solana wallet connected.", "success");
-      loadBotWallet();
-      provider.on?.("accountChanged", (publicKey) => { if (publicKey) { state.solana.address = publicKey.toString(); renderConnections(); } });
     } catch (error) {
       message(error?.message || "The Solana wallet connection was cancelled.", "error");
     }
