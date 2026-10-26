@@ -7,6 +7,6 @@
     "default_title": "Open Coni scanner",
     "default_popup": "popup2.html"
   },
-  "host_permissions": ["https://www.pangea.trade/*"],
+  "host_permissions": ["https://laki-production.up.railway.app/*"],
   "permissions": ["storage"]
 }
