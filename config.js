@@ -1,5 +1,7 @@
+const CONI_DEPLOYMENT_URL = "https://laki-production.up.railway.app";
 window.CONI_CONFIG = {
-  apiBaseUrl: "",
+  deploymentUrl: CONI_DEPLOYMENT_URL,
+  apiBaseUrl: window.location.hostname === "laki-production.up.railway.app" ? window.location.origin : "",
   pangeaPoolsUrl: "https://www.pangea.trade/api/pools",
   marketDataUrl: "/api/market/pools",
   tokenMetadataUrl: "/api/market/token-meta",

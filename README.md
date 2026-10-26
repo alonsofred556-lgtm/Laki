@@ -16,7 +16,7 @@ Open `http://127.0.0.1:4173/` for the website and `http://127.0.0.1:4173/wallet.
 
 ## Railway deployment
 
-Create a Railway service from this repository. Railway will use the `start` script in `package.json`; it injects `PORT`, and the server binds to `0.0.0.0`. Set `CONI_ALLOWED_ORIGINS` to the generated Railway domain and configure `CONI_FUNDING_RECIPIENTS` only with reviewed production destinations. Use `/api/health` as the service health-check path. Do not enable custody, signing, or automated trading from environment variables until the signer and execution services have been independently audited.
+Create a Railway service from this repository. The current deployment URL is `https://laki-production.up.railway.app`. Railway will use the `start` script in `package.json`; it injects `PORT`, and the server binds to `0.0.0.0`. Set `CONI_ALLOWED_ORIGINS` to `https://laki-production.up.railway.app` and configure `CONI_FUNDING_RECIPIENTS` only with reviewed production destinations. Use `/api/health` as the service health-check path. Do not enable custody, signing, or automated trading from environment variables until the signer and execution services have been independently audited.
 
 ## Current scope
 
