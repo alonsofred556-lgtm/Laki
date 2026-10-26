@@ -53,7 +53,8 @@
           $("#coni-execution-ledger").innerHTML = executionRows.length ? executionRows.slice(0, 30).map((item) => {
             const profit = item.realizedProfitUsd != null ? `$${Number(item.realizedProfitUsd).toFixed(4)}` : item.expectedProfitUsd != null ? `expected $${Number(item.expectedProfitUsd).toFixed(4)}` : "—";
             const route = (item.legs || []).map((leg) => `${esc(leg.kind)}:${esc(leg.state)}`).join(" · ");
-            return `<div class="activity-ledger-row"><span class="activity-kind ${item.state === "settled" ? "trade" : "bridge"}">${esc(String(item.state).toUpperCase())}</span><div><strong>${esc(item.slug || "Pangea route")}</strong><small>${route || "Awaiting lifecycle events"} · ${esc(item.createdAt)}</small></div><b>${esc(profit)}</b></div>`;
+            const payout = item.profitSettlement ? ` · USDG ${esc(item.profitSettlement.state)}` : "";
+            return `<div class="activity-ledger-row"><span class="activity-kind ${item.state === "settled" ? "trade" : "bridge"}">${esc(String(item.state).toUpperCase())}</span><div><strong>${esc(item.slug || "Pangea route")}</strong><small>${route || "Awaiting lifecycle events"}${payout} · ${esc(item.createdAt)}</small></div><b>${esc(profit)}</b></div>`;
           }).join("") : `<div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>No Coni execution records</strong><p>Connect and authenticate a wallet; paper scans do not appear as settled trades.</p></div></div>`;
           $("#activity-sync").textContent = "Feed updated";
           $("#activity-status").textContent = `Updated ${new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}`;

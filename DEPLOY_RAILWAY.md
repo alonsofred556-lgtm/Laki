@@ -69,7 +69,7 @@ The migration creates wallet challenges, identities, per-chain bot-wallet record
 
 ## Funding verification worker
 
-The funding flow is non-custodial: the user approves a transfer in an external wallet, while the worker automatically discovers transfers to reviewed recipients. The discovery record remains `unclaimed` when it cannot match a wallet and exact funding intent. A user claim links it only after the sender, destination, asset, and amount match; a separate verifier confirms the successful receipt, network identity, and finality before crediting the ledger. Create a second Railway service from this repository and set its config file to `railway.worker.toml`; it uses the same database, Redis, and server-side RPC variables:
+The funding flow is non-custodial: the user approves a transfer in an external wallet, while the worker automatically discovers transfers to reviewed recipients and active per-user bot-wallet addresses, including Solana SPL token accounts. The discovery record remains `unclaimed` when it has no exact funding intent. An authenticated bot-wallet owner can claim one exact observation to create a verification intent; a separate verifier confirms the sender (when intent-bound), destination, asset, amount, network identity, and finality before crediting the ledger. Create a second Railway service from this repository and set its config file to `railway.worker.toml`; it uses the same database, Redis, and server-side RPC variables:
 
 ```text
 python manage.py verify_deposits --loop-seconds 30
@@ -101,7 +101,7 @@ Create a separate private Railway service from `railway.arbitrage.toml`:
 python manage.py scan_arbitrage --loop-seconds 30
 ```
 
-Set `CONI_ARBITRAGE_REQUIRE_QUOTES=true` and configure only public bot wallet addresses for quote requests. The worker follows buy → Pangea canonical bridge quote → sell-on-delivered-amount, persists rejected/take-paper decisions, and never signs or broadcasts. Each authenticated identity also receives five durable bot-wallet placeholders; an address is usable only after the private signer/MPC service provisions and attests it through the private callback endpoint. It must not be treated as a live trader until the signer, simulation, approval, bridge-arrival, and reconciliation controls are independently reviewed.
+Set `CONI_ARBITRAGE_REQUIRE_QUOTES=true` and configure only public bot wallet addresses for quote requests. The worker evaluates every profitable cross-chain pool direction for each Pangea launch (up to `CONI_ARBITRAGE_MAX_CANDIDATES`), then requests exact quotes for the highest-gap routes. It follows buy → Pangea canonical bridge quote → sell-on-delivered-amount, persists rejected/take-paper decisions, and never signs or broadcasts. Each authenticated identity also receives five durable bot-wallet placeholders; an address is usable only after the private signer/MPC service provisions and attests it through the private callback endpoint. It must not be treated as a live trader until the signer, simulation, approval, bridge-arrival, and reconciliation controls are independently reviewed.
 
 ## Quote-bound execution planner
 
@@ -128,6 +128,13 @@ https://laki-production.up.railway.app/api/bot/status
 ```
 
 The expected initial bot status is `mode: "disabled"`, `paused: true`, and `executionReady: false`.
+
+The web service runs `collectstatic` during the Railway build. A warning about
+`/app/staticfiles/` during an older deployment is harmless by itself, but a
+new deployment should contain the generated static directory. The token list
+also no longer performs one blocking Pangea metadata request per launch; logos
+from the live launch feed are returned immediately, while missing logos can be
+resolved through `/api/market/token-meta` without blocking `/api/market/tokens`.
 
 ## Operations MCP process
 

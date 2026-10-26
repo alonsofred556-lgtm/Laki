@@ -2,6 +2,19 @@
 
 This is a separate private service, not a Django view. It validates a short-lived, hashed, structured transaction intent and records the exact digest that an HSM/MPC adapter would sign. It intentionally returns `signer-adapter-required` until an independently audited custody provider is installed.
 
+For bot-wallet top-ups and withdrawals, the adapter may call
+`/api/internal/signer/bot-transfer-event` with only the transfer UUID, a
+strict lifecycle event (`submitted`, `confirmed`, or `failed`), an
+idempotency key, the resulting transaction hash, and bounded metadata. A
+confirmed withdrawal settles its pre-reserved ledger amount; a failed one
+releases the reservation. Top-up balances are credited only by the separate
+deposit verifier after an exact on-chain observation.
+
+For realized profit, use `/api/internal/signer/profit-settlement-event`. A
+`confirmed` event must include metadata matching the exact configured
+recipient, USDG token, `robinhood` chain, and base-unit amount. Coni credits
+the user's ledger only after that proof-bound callback.
+
 The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), and `SIGNER_MAX_VALUE_BASE_UNITS` through Railway Variables or a secret manager. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing.
 
 Run locally only for policy tests:

@@ -1,3 +1,6 @@
+[build]
+buildCommand = "python manage.py collectstatic --noinput"
+
 [deploy]
 startCommand = "gunicorn coni_backend.wsgi:application --bind 0.0.0.0:$PORT"
 healthcheckPath = "/api/health"

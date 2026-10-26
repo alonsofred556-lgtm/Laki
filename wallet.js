@@ -277,9 +277,35 @@
       $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
       const tokens = (result.tradedTokens || []).map((item) => `<span class="network-pill">${esc(item.slug)}</span>`).join(" ") || "No completed token trades";
       $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(result.pnl?.realizedUsd || "0")}</b><small>${esc(result.pnl?.settledTrades || 0)} settled trades · ${esc(result.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (result.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+      loadUnclaimedDeposits();
     } catch {
       $("#bot-wallet-state").textContent = "UNAVAILABLE";
     }
+  }
+
+  async function loadUnclaimedDeposits() {
+    const panel = $("#unclaimed-deposits");
+    if (!panel) return;
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/funding/unclaimed`, { credentials: "include", cache: "no-store" });
+      if (!response.ok) { panel.innerHTML = ""; return; }
+      const result = await response.json();
+      const deposits = Array.isArray(result.deposits) ? result.deposits : [];
+      panel.innerHTML = deposits.length
+        ? `<div class="bot-pnl-strip"><strong>UNCLAIMED DISCOVERIES</strong><small>These transfers reached your active bot wallet. Claiming only creates a verification intent; it does not credit funds immediately.</small></div>` + deposits.map((item) => `<div class="activity-item"><span class="activity-kind bridge">${esc(item.asset)}</span><div><strong>${esc(item.chain)} · ${esc(item.amountBaseUnits)} base units</strong><small>${esc(short(item.txHash))} · ${esc(item.observedAt)}</small></div><button class="secondary-button" data-claim-observation="${esc(item.id)}">Claim for verification</button></div>`).join("")
+        : "";
+    } catch {
+      panel.innerHTML = "";
+    }
+  }
+
+  async function claimUnclaimedDeposit(observationId) {
+    const response = await fetch(`${config.apiBaseUrl}/api/funding/claim-unclaimed`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ observationId }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Could not claim the discovered deposit");
+    $("#funding-status").textContent = "Discovered deposit claimed for exact transaction and finality verification.";
+    loadUnclaimedDeposits();
+    loadBotWallet();
   }
 
   async function encryptLocalSecret(secret, password) {
@@ -364,6 +390,18 @@
   $("#submit-bot-withdrawal").addEventListener("click", () => submitBotWithdrawal().catch((error) => { $("#funding-status").textContent = error?.message || "Bot withdrawal could not be requested."; }));
   $("#import-local-wallet").addEventListener("click", () => importLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local encryption failed; no key was uploaded."; }));
   $("#create-internal-wallet").addEventListener("click", createInternalWallet);
+  document.addEventListener("click", (event) => {
+    const claim = event.target.closest("[data-claim-observation]");
+    if (claim) {
+      claim.disabled = true;
+      claim.textContent = "Claiming…";
+      claimUnclaimedDeposit(claim.dataset.claimObservation).catch((error) => {
+        claim.disabled = false;
+        claim.textContent = "Claim for verification";
+        $("#funding-status").textContent = error?.message || "Could not claim the discovered deposit.";
+      });
+    }
+  });
   document.querySelectorAll("[data-surface]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-surface]").forEach((item) => item.classList.toggle("active", item === button));
     document.body.dataset.walletSurface = button.dataset.surface;

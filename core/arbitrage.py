@@ -312,19 +312,31 @@ def fresh_user_quotes(opportunity, *, buy_wallet, sell_wallet):
     return row
 
 
-def scan_opportunities(*, persist=True):
-    data = request_json("/pools")
+def candidate_routes(data, *, max_candidates=None):
+    """Enumerate every profitable cross-chain pool direction in the feed."""
     candidates = []
     for launch in data.get("launches", []):
-        pools = [pool for pool in launch.get("pools", []) if isinstance(pool, dict) and _pool_price(pool) > ZERO and not pool.get("error") and pool.get("token")]
-        if len(pools) < 2:
-            continue
-        buy = min(pools, key=_pool_price)
-        sell = max(pools, key=_pool_price)
-        if _pool_price(sell) <= _pool_price(buy):
-            continue
-        candidates.append((launch, buy, sell))
+        pools = [
+            pool for pool in launch.get("pools", [])
+            if isinstance(pool, dict)
+            and _pool_price(pool) > ZERO
+            and not pool.get("error")
+            and pool.get("token")
+        ]
+        for buy in pools:
+            for sell in pools:
+                if buy is sell or buy.get("chain") == sell.get("chain") or _pool_price(sell) <= _pool_price(buy):
+                    continue
+                candidates.append((launch, buy, sell))
     candidates.sort(key=lambda item: (_pool_price(item[2]) / _pool_price(item[1]) - 1), reverse=True)
+    if max_candidates is None:
+        max_candidates = int(getattr(settings, "CONI_ARBITRAGE_MAX_CANDIDATES", 500))
+    return candidates[:max(1, max_candidates)]
+
+
+def scan_opportunities(*, persist=True):
+    data = request_json("/pools")
+    candidates = candidate_routes(data)
     result = []
     for position, (launch, buy, sell) in enumerate(candidates):
         trade_quotes = bridge_quote = None

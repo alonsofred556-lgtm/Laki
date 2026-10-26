@@ -44,7 +44,10 @@ class BotWallet(models.Model):
 
     class Meta:
         db_table = "bot_wallets"
-        constraints = [models.UniqueConstraint(fields=["owner", "chain", "mode"], name="bot_wallet_owner_chain_mode")]
+        constraints = [
+            models.UniqueConstraint(fields=["owner", "chain", "mode"], name="bot_wallet_owner_chain_mode"),
+            models.UniqueConstraint(fields=["chain", "address"], condition=~models.Q(address=""), name="bot_wallet_chain_address_once"),
+        ]
         indexes = [models.Index(fields=["owner", "status"], name="bot_wallet_owner_status")]
 
 
@@ -67,6 +70,20 @@ class BotWalletTransfer(models.Model):
     class Meta:
         db_table = "bot_wallet_transfers"
         indexes = [models.Index(fields=["bot_wallet", "created_at"], name="bot_transfer_wallet_created")]
+
+
+class BotWalletTransferEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    transfer = models.ForeignKey(BotWalletTransfer, on_delete=models.PROTECT, related_name="events")
+    event = models.CharField(max_length=24)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "bot_wallet_transfer_events"
+        indexes = [models.Index(fields=["transfer", "created_at"], name="bot_transfer_event_created")]
 
 
 class LedgerAccount(models.Model):
@@ -371,3 +388,17 @@ class ProfitSettlement(models.Model):
     class Meta:
         db_table = "profit_settlements"
         indexes = [models.Index(fields=["state", "created_at"], name="profit_state_created")]
+
+
+class ProfitSettlementEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    settlement = models.ForeignKey(ProfitSettlement, on_delete=models.PROTECT, related_name="events")
+    event = models.CharField(max_length=24)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "profit_settlement_events"
+        indexes = [models.Index(fields=["settlement", "created_at"], name="profit_event_created")]

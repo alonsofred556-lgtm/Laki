@@ -55,6 +55,15 @@ def _identity_and_intent(chain, asset, sender, destination, amount):
     for intent in candidates:
         if intent.wallet_identity and intent.wallet_identity.address.lower() == sender.lower():
             return intent.wallet_identity, intent
+    # A transfer into an active per-user bot wallet is discoverable even when
+    # the user did not create an intent first. Keep it explicitly unclaimed;
+    # the owner must claim it and the verifier must still prove finality.
+    from .models import BotWallet
+    wallet = BotWallet.objects.filter(
+        chain=chain, status="active", address__iexact=destination,
+    ).select_related("owner").first()
+    if wallet:
+        return wallet.owner, None
     return None, None
 
 
@@ -73,16 +82,17 @@ def _record_candidate(*, chain, asset, sender, destination, tx_hash, event_index
         "block_number": block_number,
         "block_hash": block_hash,
         "amount_base_units": amount,
-        "status": "pending-verification" if identity else "unclaimed",
-        "rejection_code": None if identity else "unclaimed",
+        "status": "pending-verification" if intent else "unclaimed",
+        "rejection_code": None if intent else "unclaimed",
         "raw_event": raw_event,
     }
     observation, created = DepositObservation.objects.get_or_create(event_key=event_key, defaults=defaults)
     if not created and observation.status == "unclaimed" and identity:
         observation.wallet_identity = identity
-        observation.funding_intent = intent
-        observation.status = "pending-verification"
-        observation.rejection_code = None
+        if intent:
+            observation.funding_intent = intent
+            observation.status = "pending-verification"
+            observation.rejection_code = None
         observation.save(update_fields=["wallet_identity", "funding_intent", "status", "rejection_code"])
     if intent and intent.status == "awaiting-wallet-approval":
         intent.status = "pending-verification"
@@ -263,54 +273,70 @@ def _solana_instruction_matches(transaction_data, token_account, mint, program_i
 
 
 def discover_solana_spl():
-    """Discover unclaimed SPL transfers to every configured treasury token account."""
+    """Discover SPL transfers to treasury and active user bot-wallet owners.
+
+    A discovered transfer is still only an observation. It is not credited
+    unless an exact funding intent, sender, asset, destination, amount, and
+    finalized transaction all pass the verifier.
+    """
     chain, rpc = "solana", settings.CONI_SOLANA_RPC_URL
     if not rpc:
         return {"chain": chain, "status": "unconfigured", "created": 0}
     created = 0
     configured = 0
+    from .models import BotWallet
+
     for asset, config in token_registry().items():
         chain_config = config.get(chain) if isinstance(config, dict) else None
         mint = chain_config.get("address") if isinstance(chain_config, dict) else chain_config
         program_id = chain_config.get("programId") if isinstance(chain_config, dict) else None
-        recipient = recipient_for(asset, chain)
-        if not mint or not recipient:
+        recipients = set()
+        treasury_recipient = recipient_for(asset, chain)
+        if treasury_recipient:
+            recipients.add(treasury_recipient)
+        recipients.update(
+            wallet.address
+            for wallet in BotWallet.objects.filter(chain=chain, status="active").exclude(address="")
+            if wallet.address
+        )
+        if not mint or not recipients:
             continue
-        configured += 1
-        account_params = {"mint": mint, "encoding": "jsonParsed", "commitment": "finalized"}
-        account_data = _rpc(rpc, "getTokenAccountsByOwner", [recipient, account_params]) or {}
-        accounts = (account_data.get("value") if isinstance(account_data, dict) else None) or []
-        for account in accounts:
-            token_account = account.get("pubkey") if isinstance(account, dict) else None
-            if not token_account:
-                continue
-            cursor = _spl_cursor(asset, token_account)
-            params = [token_account, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
-            if cursor.cursor_hash:
-                params[1]["before"] = cursor.cursor_hash
-            signatures = _rpc(rpc, "getSignaturesForAddress", params) or []
-            for signature_data in reversed(signatures):
-                signature = signature_data.get("signature")
-                if not signature or signature_data.get("err"):
+        for recipient in sorted(recipients):
+            configured += 1
+            account_params = {"mint": mint, "encoding": "jsonParsed", "commitment": "finalized"}
+            account_data = _rpc(rpc, "getTokenAccountsByOwner", [recipient, account_params]) or {}
+            accounts = (account_data.get("value") if isinstance(account_data, dict) else None) or []
+            for account in accounts:
+                token_account = account.get("pubkey") if isinstance(account, dict) else None
+                if not token_account:
                     continue
-                transaction_data = _rpc(rpc, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
-                if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
-                    continue
-                for instruction_index, info, amount, destination_balance in _solana_instruction_matches(transaction_data, token_account, mint, program_id):
-                    authority = info.get("authority") or info.get("owner") or ""
-                    _, was_created = _record_candidate(
-                        chain=chain, asset=str(asset).upper(), sender=authority, destination=recipient,
-                        tx_hash=signature, event_index=instruction_index, amount=int(amount), block_number=transaction_data.get("slot"), block_hash=None,
-                        raw_event={"type": "solana-spl-transfer", "mint": mint, "tokenAccount": token_account, "tokenProgram": destination_balance.get("programId") or program_id, "sourceAccount": info.get("source"), "authority": authority, "slot": transaction_data.get("slot")},
-                    )
-                    created += int(was_created)
-            if signatures:
-                cursor.cursor_hash = signatures[-1].get("signature")
-            cursor.status = "healthy"
-            cursor.last_scan_at = timezone.now()
-            cursor.last_success_at = timezone.now()
-            cursor.last_error = None
-            cursor.save(update_fields=["cursor_hash", "status", "last_scan_at", "last_success_at", "last_error", "updated_at"])
+                cursor = _spl_cursor(asset, token_account)
+                params = [token_account, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
+                if cursor.cursor_hash:
+                    params[1]["before"] = cursor.cursor_hash
+                signatures = _rpc(rpc, "getSignaturesForAddress", params) or []
+                for signature_data in reversed(signatures):
+                    signature = signature_data.get("signature")
+                    if not signature or signature_data.get("err"):
+                        continue
+                    transaction_data = _rpc(rpc, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
+                    if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
+                        continue
+                    for instruction_index, info, amount, destination_balance in _solana_instruction_matches(transaction_data, token_account, mint, program_id):
+                        authority = info.get("authority") or info.get("owner") or ""
+                        _, was_created = _record_candidate(
+                            chain=chain, asset=str(asset).upper(), sender=authority, destination=recipient,
+                            tx_hash=signature, event_index=instruction_index, amount=int(amount), block_number=transaction_data.get("slot"), block_hash=None,
+                            raw_event={"type": "solana-spl-transfer", "mint": mint, "tokenAccount": token_account, "tokenProgram": destination_balance.get("programId") or program_id, "sourceAccount": info.get("source"), "authority": authority, "slot": transaction_data.get("slot")},
+                        )
+                        created += int(was_created)
+                if signatures:
+                    cursor.cursor_hash = signatures[-1].get("signature")
+                cursor.status = "healthy"
+                cursor.last_scan_at = timezone.now()
+                cursor.last_success_at = timezone.now()
+                cursor.last_error = None
+                cursor.save(update_fields=["cursor_hash", "status", "last_scan_at", "last_success_at", "last_error", "updated_at"])
     return {"chain": chain, "status": "healthy" if configured else "unconfigured", "created": created, "accounts": configured}
 
 

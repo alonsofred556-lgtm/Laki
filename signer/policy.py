@@ -37,12 +37,21 @@ class SignerPolicy:
     chains = {"ethereum", "base", "robinhood", "bsc", "solana"}
     address_re = re.compile(r"^(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$")
     hash_re = re.compile(r"^(0x)?[a-fA-F0-9]{64}$")
+    evm_address_re = re.compile(r"^0x[a-fA-F0-9]{40}$")
+    solana_address_re = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
     def __init__(self, *, mode="disabled", audit_approved=False, max_expiry_seconds=90, allowed_recipients=None, max_value_base_units=0):
         self.mode = mode
         self.audit_approved = audit_approved
         self.max_expiry_seconds = max_expiry_seconds
-        self.allowed_recipients = {chain: {item.lower() for item in values} for chain, values in (allowed_recipients or {}).items()}
+        normalized = {}
+        for chain, values in (allowed_recipients or {}).items():
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, (list, tuple, set)):
+                raise ValueError("signer allowlist values must be address lists")
+            normalized[str(chain)] = {str(item).lower() for item in values}
+        self.allowed_recipients = normalized
         self.max_value_base_units = int(max_value_base_units or 0)
 
     def validate(self, payload):
@@ -58,6 +67,8 @@ class SignerPolicy:
             raise PolicyError("quote and simulation hashes are required")
         if not self.allowed_recipients:
             raise PolicyError("recipient allowlist is not configured")
+        if self.max_value_base_units <= 0:
+            raise PolicyError("maximum transaction value is not configured")
         expires_at = int(payload.get("expiresAt", 0))
         now = int(datetime.now(timezone.utc).timestamp())
         if expires_at <= now or expires_at > now + self.max_expiry_seconds:
@@ -70,7 +81,8 @@ class SignerPolicy:
             if not isinstance(step, dict) or set(step) - {"chain", "to", "valueBaseUnits", "calldataHash", "expiresAt"}:
                 raise PolicyError("unexpected transaction fields")
             chain, recipient = str(step.get("chain", "")), str(step.get("to", ""))
-            if chain not in self.chains or not self.address_re.fullmatch(recipient):
+            address_pattern = self.solana_address_re if chain == "solana" else self.evm_address_re
+            if chain not in self.chains or not address_pattern.fullmatch(recipient):
                 raise PolicyError("invalid chain or recipient")
             if recipient.lower() not in self.allowed_recipients.get(chain, set()):
                 raise PolicyError("recipient is not allowlisted")

@@ -77,7 +77,8 @@ def _quote_hash(artifact):
 
 
 def execution_payload(execution):
-    execution = Execution.objects.prefetch_related("legs", "events").get(id=execution.id)
+    execution = Execution.objects.select_related("profit_settlement").prefetch_related("legs", "events").get(id=execution.id)
+    settlement = getattr(execution, "profit_settlement", None)
     return {
         "id": str(execution.id),
         "slug": execution.slug,
@@ -93,6 +94,16 @@ def execution_payload(execution):
         "createdAt": execution.created_at.isoformat(),
         "updatedAt": execution.updated_at.isoformat(),
         "realizedAt": execution.realized_at.isoformat() if execution.realized_at else None,
+        "profitSettlement": {
+            "id": str(settlement.id),
+            "state": settlement.state,
+            "asset": settlement.settlement_asset,
+            "chain": settlement.settlement_chain,
+            "amountBaseUnits": str(settlement.amount_base_units),
+            "recipient": settlement.recipient,
+            "txHash": settlement.tx_hash,
+            "settledAt": settlement.settled_at.isoformat() if settlement.settled_at else None,
+        } if settlement else None,
         "legs": [
             {
                 "id": str(leg.id),

@@ -91,10 +91,11 @@ def token_registry_snapshot():
         pools_for_launch = [item for item in launch.get("pools", []) if isinstance(item, dict)]
         image = _image_url(launch.get("image"))
         if not image:
-            try:
-                image = _image_url(request_json(f"/token/meta?launch={slug}").get("image"))
-            except PangeaError:
-                image = None
+            # Do not make the critical token-list request wait on one metadata
+            # call per launch. The frontend and `/market/token-meta` endpoint
+            # can resolve uncached logos separately; a slow metadata provider
+            # must never take down a Gunicorn worker serving the token list.
+            image = _image_url(cache.get(f"coni:pangea:token-image:{slug}"))
         result.append({
             "slug": slug,
             "name": launch.get("name") or slug,

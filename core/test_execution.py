@@ -8,6 +8,8 @@ from django.test import SimpleTestCase
 django.setup()
 
 from .execution import _quote_hash, next_execution_state
+from .bot_wallets import next_bot_transfer_state
+from .profit_settlement import next_settlement_state
 
 
 class ExecutionLifecycleTests(SimpleTestCase):
@@ -45,3 +47,15 @@ class ExecutionLifecycleTests(SimpleTestCase):
         artifact = {"trade": {"buy": {"amount": "10"}}, "bridge": {"route": "canonical"}}
         equivalent = {"bridge": {"route": "canonical"}, "trade": {"buy": {"amount": "10"}}}
         self.assertEqual(_quote_hash(artifact), _quote_hash(equivalent))
+
+    def test_bot_transfer_callbacks_are_strictly_ordered(self):
+        self.assertEqual(next_bot_transfer_state("pending-approval", "submitted"), "submitted")
+        self.assertEqual(next_bot_transfer_state("submitted", "confirmed"), "confirmed")
+        with self.assertRaises(ValueError):
+            next_bot_transfer_state("confirmed", "failed")
+
+    def test_profit_settlement_requires_submitted_before_confirmation(self):
+        self.assertEqual(next_settlement_state("pending-approval", "submitted"), "submitted")
+        self.assertEqual(next_settlement_state("submitted", "confirmed"), "confirmed")
+        with self.assertRaises(ValueError):
+            next_settlement_state("pending-approval", "confirmed")

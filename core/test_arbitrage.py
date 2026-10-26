@@ -8,7 +8,7 @@ from django.test import SimpleTestCase, override_settings
 
 django.setup()
 
-from .arbitrage import _amount_from_quote, evaluate_candidate
+from .arbitrage import _amount_from_quote, candidate_routes, evaluate_candidate
 from .pangea_bridge import next_bridge_state
 
 
@@ -64,3 +64,18 @@ class ArbitrageDecisionTests(SimpleTestCase):
         self.assertEqual(next_bridge_state("in-flight", "destination-confirmed"), "destination-confirmed")
         with self.assertRaises(ValueError):
             next_bridge_state("quoted", "destination-confirmed")
+
+    def test_candidate_routes_covers_each_profitable_cross_chain_direction(self):
+        data = {"launches": [{
+            "slug": "demo",
+            "pools": [
+                {"chain": "base", "token": "0xb", "priceUsd": "1"},
+                {"chain": "bsc", "token": "0xc", "priceUsd": "1.4"},
+                {"chain": "ethereum", "token": "0xd", "priceUsd": "1.2"},
+            ],
+        }]}
+        routes = candidate_routes(data, max_candidates=20)
+        self.assertEqual(len(routes), 3)
+        self.assertEqual([(row[1]["chain"], row[2]["chain"]) for row in routes], [
+            ("base", "bsc"), ("base", "ethereum"), ("ethereum", "bsc"),
+        ])

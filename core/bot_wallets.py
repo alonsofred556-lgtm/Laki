@@ -2,17 +2,31 @@
 
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 
 from .audit import record_event
 from .assets import asset_decimals, supported_asset
 from .funding import account_for, ledger_balance
-from .models import BotWallet, BotWalletTransfer, Execution, LedgerAccount, LedgerEntry, WalletIdentity
+from .models import BotWallet, BotWalletTransfer, BotWalletTransferEvent, Execution, LedgerAccount, LedgerEntry, WalletIdentity
 
 
 BOT_WALLET_CHAINS = ("ethereum", "base", "robinhood", "bsc", "solana")
 EVM_BOT_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
+BOT_TRANSFER_EVENTS = {"submitted", "confirmed", "failed"}
+_BOT_TRANSFER_TRANSITIONS = {
+    "pending-approval": {"submitted": "submitted", "failed": "failed"},
+    "submitted": {"confirmed": "confirmed", "failed": "failed"},
+}
+
+
+def next_bot_transfer_state(current, event):
+    if event not in BOT_TRANSFER_EVENTS:
+        raise ValueError("unsupported bot transfer event")
+    try:
+        return _BOT_TRANSFER_TRANSITIONS[current][event]
+    except KeyError as exc:
+        raise ValueError(f"invalid bot transfer transition {current}->{event}") from exc
 
 
 def ensure_bot_wallet(identity, *, mode="external-bot"):
@@ -168,4 +182,60 @@ def create_bot_transfer(*, identity, wallet_id, direction, asset, amount_base_un
             defaults={"asset": asset, "amount_base_units": amount_base_units},
         )
     record_event("bot_wallet.transfer.requested", actor_type="wallet", actor_id=identity.id, subject_type="bot_transfer", subject_id=transfer.id, metadata={"direction": direction, "asset": asset, "chain": identity.chain, "amountBaseUnits": amount_base_units})
+    return transfer
+
+
+@transaction.atomic
+def record_bot_transfer_event(*, transfer_id, event, idempotency_key, tx_hash="", metadata=None):
+    """Apply one private signer callback and settle/release bot ledger funds."""
+    if event not in BOT_TRANSFER_EVENTS:
+        raise ValueError("unsupported bot transfer event")
+    transfer = BotWalletTransfer.objects.select_for_update().select_related("owner", "bot_wallet").get(id=transfer_id)
+    existing = BotWalletTransferEvent.objects.filter(idempotency_key=idempotency_key).first()
+    if existing:
+        if existing.transfer_id != transfer.id:
+            raise ValueError("idempotency key belongs to another bot transfer")
+        return transfer
+    next_state = next_bot_transfer_state(transfer.state, event)
+    try:
+        with transaction.atomic():
+            BotWalletTransferEvent.objects.create(
+                idempotency_key=idempotency_key,
+                transfer=transfer,
+                event=event,
+                tx_hash=tx_hash or "",
+                metadata=metadata if isinstance(metadata, dict) else {},
+            )
+    except IntegrityError:
+        existing = BotWalletTransferEvent.objects.filter(idempotency_key=idempotency_key).first()
+        if existing and existing.transfer_id == transfer.id:
+            return transfer
+        raise ValueError("idempotency key belongs to another bot transfer")
+    if event == "confirmed" and transfer.direction == "withdrawal":
+        reserved = account_for(transfer.owner, transfer.asset, transfer.chain, "bot-withdrawal-reserved", bot_wallet=transfer.bot_wallet)
+        treasury = account_for(None, transfer.asset, transfer.chain, "onchain-outflow")
+        LedgerEntry.objects.get_or_create(
+            reference_type="bot-withdrawal",
+            reference_id=str(transfer.id),
+            debit_account=reserved,
+            credit_account=treasury,
+            defaults={"asset": transfer.asset, "amount_base_units": transfer.amount_base_units},
+        )
+    elif event == "failed" and transfer.direction == "withdrawal":
+        available = account_for(transfer.owner, transfer.asset, transfer.chain, "bot-available", bot_wallet=transfer.bot_wallet)
+        reserved = account_for(transfer.owner, transfer.asset, transfer.chain, "bot-withdrawal-reserved", bot_wallet=transfer.bot_wallet)
+        LedgerEntry.objects.get_or_create(
+            reference_type="bot-withdrawal-release",
+            reference_id=str(transfer.id),
+            debit_account=reserved,
+            credit_account=available,
+            defaults={"asset": transfer.asset, "amount_base_units": transfer.amount_base_units},
+        )
+    transfer.state = next_state
+    if tx_hash:
+        transfer.tx_hash = tx_hash
+    if event == "failed":
+        transfer.failure_code = str((metadata or {}).get("code") or "signer-failed")[:64]
+    transfer.save(update_fields=["state", "tx_hash", "failure_code", "updated_at"])
+    record_event("bot_wallet.transfer.event", actor_type="signer", subject_type="bot_transfer", subject_id=transfer.id, metadata={"event": event, "idempotencyKey": idempotency_key, "txHash": tx_hash or None})
     return transfer

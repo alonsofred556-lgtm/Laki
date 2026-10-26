@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 
 import base58
 from django.conf import settings
+from django.core.cache import cache
 from django.db import IntegrityError, connection, transaction
 from django.db.models import Count
 from django.http import FileResponse, HttpRequest, JsonResponse
@@ -24,12 +25,12 @@ from .layerzero import route_summary
 from .assets import asset_decimals, native_asset, recipient_for, supported_asset
 from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
-from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
-from .bot_wallets import bot_wallet_payload, bot_wallet_summary, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets
+from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
+from .bot_wallets import bot_wallet_payload, bot_wallet_summary, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
 from .execution import create_execution_from_opportunity, execution_payload, record_execution_event
 from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
-from .profit_settlement import prepare_usdg_settlement
+from .profit_settlement import prepare_usdg_settlement, record_usdg_settlement_event
 from .rate_limit import RateLimitUnavailable, allow as redis_allow
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
@@ -391,8 +392,60 @@ def signer_bot_wallet_attest(request):
             wallet.save(update_fields=["address", "signer_key_ref", "custody", "status", "updated_at"])
         record_event("bot_wallet.attested", actor_type="signer", actor_id=key_ref, subject_type="bot_wallet", subject_id=wallet.id, metadata={"chain": wallet.chain, "attestationHash": attestation})
         return api_response({"wallet": bot_wallet_payload(wallet), "state": "active"}, 200, request)
+    except IntegrityError:
+        return error("signer address is already bound to another bot wallet", 409, request)
     except (ValueError, json.JSONDecodeError) as exc:
         return error(str(exc), 400, request)
+
+
+@csrf_exempt
+def signer_bot_transfer_event(request):
+    """Private, idempotent callback for an already-approved bot transfer."""
+    if request.method != "POST" or not signer_event_allowed(request):
+        return error("signer event authorization required", 403, request)
+    try:
+        data = body(request)
+        allowed = {"transferId", "event", "idempotencyKey", "txHash", "metadata"}
+        if set(data) - allowed or not data.get("transferId") or data.get("event") not in {"submitted", "confirmed", "failed"} or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
+            return error("invalid bot transfer event", 400, request)
+        transfer = BotWalletTransfer.objects.select_related("bot_wallet").filter(id=data["transferId"]).first()
+        if not transfer:
+            return error("bot transfer not found", 404, request)
+        tx_hash = str(data.get("txHash", ""))
+        if tx_hash:
+            if transfer.chain == "solana" and not SOL_TX_RE.fullmatch(tx_hash):
+                return error("invalid Solana transaction signature", 400, request)
+            if transfer.chain in EVM_CHAINS and not EVM_TX_RE.fullmatch(tx_hash):
+                return error("invalid EVM transaction hash", 400, request)
+        transfer = record_bot_transfer_event(transfer_id=transfer.id, event=data["event"], idempotency_key=data["idempotencyKey"], tx_hash=tx_hash, metadata=data.get("metadata"))
+        return api_response({"transferId": str(transfer.id), "state": transfer.state, "txHash": transfer.tx_hash or None, "failureCode": transfer.failure_code or None}, 200, request)
+    except BotWalletTransfer.DoesNotExist:
+        return error("bot transfer not found", 404, request)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return error(str(exc), 409, request)
+
+
+@csrf_exempt
+def signer_profit_settlement_event(request):
+    if request.method != "POST" or not signer_event_allowed(request):
+        return error("signer event authorization required", 403, request)
+    try:
+        data = body(request)
+        allowed = {"settlementId", "event", "idempotencyKey", "txHash", "metadata"}
+        if set(data) - allowed or not data.get("settlementId") or data.get("event") not in {"submitted", "confirmed", "failed"} or not IDEMPOTENCY_RE.fullmatch(str(data.get("idempotencyKey", ""))):
+            return error("invalid profit settlement event", 400, request)
+        settlement = ProfitSettlement.objects.filter(id=data["settlementId"]).first()
+        if not settlement:
+            return error("profit settlement not found", 404, request)
+        tx_hash = str(data.get("txHash", ""))
+        if tx_hash and not EVM_TX_RE.fullmatch(tx_hash):
+            return error("invalid settlement transaction hash", 400, request)
+        settlement = record_usdg_settlement_event(settlement_id=settlement.id, event=data["event"], idempotency_key=data["idempotencyKey"], tx_hash=tx_hash, metadata=data.get("metadata"))
+        return api_response({"settlementId": str(settlement.id), "state": settlement.state, "txHash": settlement.tx_hash or None, "settledAt": settlement.settled_at.isoformat() if settlement.settled_at else None}, 200, request)
+    except ProfitSettlement.DoesNotExist:
+        return error("profit settlement not found", 404, request)
+    except (ValueError, TypeError, InvalidOperation, json.JSONDecodeError) as exc:
+        return error(str(exc), 409, request)
 
 
 def pangea_proxy(request, path, query=None, method="GET"):
@@ -415,7 +468,15 @@ def market_tokens(request):
 
 def market_meta(request):
     launch = request.GET.get("launch", "")
-    return pangea_proxy(request, "/token/meta", f"launch={launch}") if SLUG_RE.fullmatch(launch) else error("invalid launch", 400, request)
+    if not SLUG_RE.fullmatch(launch):
+        return error("invalid launch", 400, request)
+    try:
+        payload = request_json(f"/token/meta?launch={launch}")
+        if isinstance(payload, dict) and payload.get("image"):
+            cache.set(f"coni:pangea:token-image:{launch}", payload["image"], 3600)
+        return api_response(payload, 200, request)
+    except (PangeaError, ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 502, request)
 
 
 def market_history(request):
@@ -594,6 +655,76 @@ def funding_status(request, intent_id):
             "creditedAt": item.credited_at.isoformat() if item.credited_at else None,
         } for item in observations],
     }, 200, request)
+
+
+def unclaimed_deposits(request):
+    try:
+        identity = require_session(request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    rows = DepositObservation.objects.filter(
+        wallet_identity=identity,
+        status="unclaimed",
+        funding_intent__isnull=True,
+    ).order_by("-observed_at")[:50]
+    return api_response({"deposits": [{
+        "id": str(item.id),
+        "asset": item.asset,
+        "chain": item.chain,
+        "sender": item.sender,
+        "destination": item.destination,
+        "txHash": item.tx_hash,
+        "eventIndex": item.event_index,
+        "amountBaseUnits": str(item.amount_base_units),
+        "status": item.status,
+        "observedAt": item.observed_at.isoformat(),
+    } for item in rows]}, 200, request)
+
+
+@csrf_exempt
+def claim_unclaimed_deposit(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        identity = require_session(request)
+        data = body(request)
+        with transaction.atomic():
+            observation = DepositObservation.objects.select_for_update().filter(
+                id=data.get("observationId"),
+                wallet_identity=identity,
+                status="unclaimed",
+                funding_intent__isnull=True,
+            ).first()
+            if not observation:
+                return error("unclaimed deposit not found", 404, request)
+            bot_wallet = BotWallet.objects.filter(
+                owner=identity,
+                chain=observation.chain,
+                address__iexact=observation.destination,
+                status="active",
+            ).first()
+            if not bot_wallet or not supported_asset(observation.asset, observation.chain) or asset_decimals(observation.asset, observation.chain) is None:
+                return error("deposit destination is not an active supported bot wallet", 409, request)
+            intent = FundingIntent.objects.create(
+                wallet_identity=identity,
+                bot_wallet=bot_wallet,
+                asset=observation.asset,
+                chain=observation.chain,
+                amount_base_units=observation.amount_base_units,
+                destination=observation.destination,
+                status="pending-verification",
+                expires_at=timezone.now() + timedelta(minutes=30),
+            )
+            observation.funding_intent = intent
+            observation.status = "pending-verification"
+            observation.rejection_code = None
+            observation.save(update_fields=["funding_intent", "status", "rejection_code"])
+        record_event("funding.unclaimed.claimed", actor_type="wallet", actor_id=identity.id, subject_type="deposit_observation", subject_id=observation.id, request_id=request_id(request), metadata={"intentId": str(intent.id), "asset": observation.asset, "chain": observation.chain, "amountBaseUnits": str(observation.amount_base_units)})
+        return api_response({"observationId": str(observation.id), "intentId": str(intent.id), "state": observation.status, "message": "The deposit is queued for exact transaction and finality verification."}, 202, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except (ValueError, json.JSONDecodeError) as exc:
+        return error(str(exc), 400, request)
 
 
 @csrf_exempt
