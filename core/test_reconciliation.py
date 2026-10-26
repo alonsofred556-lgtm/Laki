@@ -1,5 +1,6 @@
 import os
 from types import SimpleNamespace
+from unittest.mock import patch
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "coni_backend.settings")
 
@@ -8,10 +9,21 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .reconciliation import bot_transfer_ledger_anomalies, profit_settlement_ledger_anomalies
+from .reconciliation import bot_transfer_ledger_anomalies, profit_settlement_ledger_anomalies, release_expired_withdrawals
 
 
 class ReconciliationInvariantTests(SimpleTestCase):
+    @patch("core.reconciliation.record_event")
+    @patch("core.reconciliation.release_withdrawal")
+    @patch("core.reconciliation.WithdrawalRequest.objects")
+    def test_expiry_pass_releases_only_pending_approval_requests(self, manager, release, record):
+        manager.filter.return_value.only.return_value = [SimpleNamespace(id="withdrawal-1")]
+        release.return_value = SimpleNamespace(status="released")
+        self.assertEqual(release_expired_withdrawals(), 1)
+        manager.filter.assert_called_once()
+        self.assertEqual(release.call_args.args, ("withdrawal-1", "expired"))
+        record.assert_called_once()
+
     def test_confirmed_bot_withdrawal_requires_one_settlement(self):
         transfer = SimpleNamespace(id="transfer-1", direction="withdrawal", state="confirmed")
         anomalies = bot_transfer_ledger_anomalies(transfer, reservation_count=1, settlement_count=0, release_count=0)

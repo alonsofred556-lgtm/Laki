@@ -91,7 +91,7 @@ Create another private Railway service with `railway.reconciliation.toml`:
 python manage.py reconcile_ledger --loop-seconds 60
 ```
 
-It checks that every credited deposit has exactly one ledger entry, pending withdrawals have reservations, completed withdrawals have settlements, and user balances are never negative. It records every run and anomaly in PostgreSQL and does not mutate history. Chain-level reconciliation still requires provider-specific balance reports and operator review.
+It checks that every credited deposit has exactly one ledger entry, pending withdrawals have reservations, completed withdrawals have settlements, bot-wallet withdrawals have matching reservation/settlement/release entries, USDG payouts match their confirmed ledger entries, and user balances are never negative. It also releases only expired `pending-approval` withdrawals by creating an immutable release entry. It records every run and anomaly in PostgreSQL without editing history. Chain-level reconciliation still requires provider-specific balance reports and operator review.
 
 ## Arbitrage scanner worker
 

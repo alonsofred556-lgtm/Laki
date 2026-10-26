@@ -4,7 +4,7 @@ from django.db.models import Count
 from django.utils import timezone
 
 from .audit import record_event
-from .funding import ledger_balance
+from .funding import ledger_balance, release_withdrawal
 from .models import BotWalletTransfer, DepositObservation, LedgerAccount, LedgerEntry, ProfitSettlement, ReconciliationRun, WithdrawalRequest
 
 
@@ -32,10 +32,29 @@ def profit_settlement_ledger_anomalies(settlement, *, settlement_entry_count):
     return []
 
 
+def release_expired_withdrawals(now=None):
+    """Release reservations for requests that never reached signer approval."""
+    now = now or timezone.now()
+    released = 0
+    for withdrawal in WithdrawalRequest.objects.filter(status="pending-approval", expires_at__lte=now).only("id"):
+        current = release_withdrawal(withdrawal.id, "expired")
+        if current.status == "released":
+            released += 1
+            record_event(
+                "withdrawal.expired",
+                actor_type="system",
+                subject_type="withdrawal",
+                subject_id=withdrawal.id,
+                metadata={"reason": "approval-timeout"},
+            )
+    return released
+
+
 def reconcile_ledger():
     run = ReconciliationRun.objects.create(worker="ledger-reconciler")
     anomalies = []
     checked = 0
+    expired_withdrawals = release_expired_withdrawals()
     for observation in DepositObservation.objects.filter(status="credited"):
         checked += 1
         entries = LedgerEntry.objects.filter(reference_type="deposit", reference_id=observation.event_key)
@@ -73,8 +92,8 @@ def reconcile_ledger():
     run.checked_count = checked
     run.anomaly_count = len(anomalies)
     run.status = "anomaly" if anomalies else "healthy"
-    run.details = {"anomalies": anomalies[:200]}
+    run.details = {"anomalies": anomalies[:200], "expiredWithdrawalsReleased": expired_withdrawals}
     run.finished_at = timezone.now()
     run.save(update_fields=["checked_count", "anomaly_count", "status", "details", "finished_at"])
     record_event("ledger.reconciliation", result=run.status, subject_type="reconciliation_run", subject_id=run.id, metadata={"checked": checked, "anomalies": len(anomalies)})
-    return {"runId": str(run.id), "status": run.status, "checked": checked, "anomalies": anomalies}
+    return {"runId": str(run.id), "status": run.status, "checked": checked, "anomalies": anomalies, "expiredWithdrawalsReleased": expired_withdrawals}
