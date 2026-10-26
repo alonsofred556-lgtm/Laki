@@ -27,3 +27,4 @@ Open `http://127.0.0.1:4173/` for the website and `http://127.0.0.1:4173/wallet.
 - No seed phrases, private keys, custody, funding approvals, bridge transactions, or automatic trading.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [backend/README.md](backend/README.md) before adding wallet signing or execution.
+# ClickOt
