@@ -12,6 +12,7 @@ from .models import Execution, LedgerEntry, ProfitSettlement, ProfitSettlementEv
 
 
 SETTLEMENT_EVENTS = {"submitted", "confirmed", "failed"}
+SETTLEMENT_PROOF_EVENTS = {"submitted", "confirmed"}
 _SETTLEMENT_TRANSITIONS = {
     "pending-approval": {"submitted": "submitted", "failed": "failed"},
     "submitted": {"confirmed": "confirmed", "failed": "failed"},
@@ -25,6 +26,11 @@ def next_settlement_state(current, event):
         return _SETTLEMENT_TRANSITIONS[current][event]
     except KeyError as exc:
         raise ValueError(f"invalid settlement transition {current}->{event}") from exc
+
+
+def settlement_event_requires_tx_hash(event):
+    """Return whether a signer callback must include an on-chain tx proof."""
+    return event in SETTLEMENT_PROOF_EVENTS
 
 
 def _decimal(value):
@@ -84,6 +90,8 @@ def prepare_usdg_settlement(*, execution_id, user_identity_id, realized_profit_u
 def record_usdg_settlement_event(*, settlement_id, event, idempotency_key, tx_hash="", metadata=None):
     if event not in SETTLEMENT_EVENTS:
         raise ValueError("unsupported settlement event")
+    if settlement_event_requires_tx_hash(event) and not str(tx_hash or "").strip():
+        raise ValueError("USDG settlement proof requires tx hash")
     settlement = ProfitSettlement.objects.select_for_update().select_related("user_identity").get(id=settlement_id)
     existing = ProfitSettlementEvent.objects.filter(idempotency_key=idempotency_key).first()
     if existing:

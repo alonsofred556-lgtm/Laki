@@ -17,6 +17,7 @@ from .models import BotWallet, BotWalletProvisionRequest, BotWalletTransfer, Bot
 BOT_WALLET_CHAINS = ("ethereum", "base", "robinhood", "bsc", "solana")
 EVM_BOT_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 BOT_TRANSFER_EVENTS = {"submitted", "confirmed", "failed"}
+BOT_TRANSFER_PROOF_EVENTS = {"submitted", "confirmed"}
 PROVISION_LEASE_SECONDS = 120
 _BOT_TRANSFER_TRANSITIONS = {
     "pending-approval": {"submitted": "submitted", "failed": "failed"},
@@ -80,6 +81,11 @@ def next_bot_transfer_state(current, event):
         return _BOT_TRANSFER_TRANSITIONS[current][event]
     except KeyError as exc:
         raise ValueError(f"invalid bot transfer transition {current}->{event}") from exc
+
+
+def bot_transfer_event_requires_tx_hash(event):
+    """Return whether a signer callback must include an on-chain tx proof."""
+    return event in BOT_TRANSFER_PROOF_EVENTS
 
 
 def bot_transfer_chain(wallet):
@@ -296,6 +302,8 @@ def record_bot_transfer_event(*, transfer_id, event, idempotency_key, tx_hash=""
     """Apply one private signer callback and settle/release bot ledger funds."""
     if event not in BOT_TRANSFER_EVENTS:
         raise ValueError("unsupported bot transfer event")
+    if bot_transfer_event_requires_tx_hash(event) and not str(tx_hash or "").strip():
+        raise ValueError("bot transfer proof requires tx hash")
     transfer = BotWalletTransfer.objects.select_for_update().select_related("owner", "bot_wallet").get(id=transfer_id)
     existing = BotWalletTransferEvent.objects.filter(idempotency_key=idempotency_key).first()
     if existing:

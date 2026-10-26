@@ -7,9 +7,15 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .execution import _quote_hash, next_execution_state, signer_wallets_ready
-from .bot_wallets import next_bot_transfer_state
-from .profit_settlement import next_settlement_state
+from .execution import (
+    _quote_hash,
+    execution_event_requires_bridge_guid,
+    execution_event_requires_tx_hash,
+    next_execution_state,
+    signer_wallets_ready,
+)
+from .bot_wallets import bot_transfer_event_requires_tx_hash, next_bot_transfer_state
+from .profit_settlement import next_settlement_state, settlement_event_requires_tx_hash
 
 
 class ExecutionLifecycleTests(SimpleTestCase):
@@ -55,6 +61,13 @@ class ExecutionLifecycleTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             next_execution_state("planned", "refunded")
 
+    def test_execution_callbacks_require_transaction_proof(self):
+        self.assertTrue(execution_event_requires_tx_hash("buy-submitted"))
+        self.assertTrue(execution_event_requires_tx_hash("sell-confirmed"))
+        self.assertFalse(execution_event_requires_tx_hash("bridge-in-flight"))
+        self.assertTrue(execution_event_requires_bridge_guid("bridge-in-flight"))
+        self.assertFalse(execution_event_requires_bridge_guid("bridge-source-confirmed"))
+
     def test_quote_hash_is_canonical_for_nested_artifact(self):
         artifact = {"trade": {"buy": {"amount": "10"}}, "bridge": {"route": "canonical"}}
         equivalent = {"bridge": {"route": "canonical"}, "trade": {"buy": {"amount": "10"}}}
@@ -66,8 +79,18 @@ class ExecutionLifecycleTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             next_bot_transfer_state("confirmed", "failed")
 
+    def test_bot_transfer_proof_is_required_for_submission_and_confirmation(self):
+        self.assertTrue(bot_transfer_event_requires_tx_hash("submitted"))
+        self.assertTrue(bot_transfer_event_requires_tx_hash("confirmed"))
+        self.assertFalse(bot_transfer_event_requires_tx_hash("failed"))
+
     def test_profit_settlement_requires_submitted_before_confirmation(self):
         self.assertEqual(next_settlement_state("pending-approval", "submitted"), "submitted")
         self.assertEqual(next_settlement_state("submitted", "confirmed"), "confirmed")
         with self.assertRaises(ValueError):
             next_settlement_state("pending-approval", "confirmed")
+
+    def test_profit_settlement_proof_is_required_for_submission_and_confirmation(self):
+        self.assertTrue(settlement_event_requires_tx_hash("submitted"))
+        self.assertTrue(settlement_event_requires_tx_hash("confirmed"))
+        self.assertFalse(settlement_event_requires_tx_hash("failed"))

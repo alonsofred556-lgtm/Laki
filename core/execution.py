@@ -31,6 +31,15 @@ EXECUTION_EVENTS = {
     "failed",
     "refunded",
 }
+EXECUTION_TX_PROOF_EVENTS = {
+    "buy-submitted",
+    "buy-confirmed",
+    "bridge-source-submitted",
+    "bridge-source-confirmed",
+    "bridge-destination-confirmed",
+    "sell-submitted",
+    "sell-confirmed",
+}
 
 _TRANSITIONS = {
     "planned": {"signer-requested": "awaiting-signer", "failed": "failed"},
@@ -60,6 +69,16 @@ def next_execution_state(current, event):
         return _TRANSITIONS[current][event]
     except KeyError as exc:
         raise ValueError(f"invalid execution transition {current}->{event}") from exc
+
+
+def execution_event_requires_tx_hash(event):
+    """Return whether an execution callback must include an on-chain tx proof."""
+    return event in EXECUTION_TX_PROOF_EVENTS
+
+
+def execution_event_requires_bridge_guid(event):
+    """Return whether a bridge lifecycle callback needs its message proof."""
+    return event == "bridge-in-flight"
 
 
 def _money(value):
@@ -288,6 +307,10 @@ def record_execution_event(*, execution_id, event, idempotency_key, tx_hash="", 
     """Apply one signer/reconciliation event exactly once."""
     if event not in EXECUTION_EVENTS or event == "signer-requested" and realized_profit_usd is not None:
         raise ValueError("invalid execution event")
+    if execution_event_requires_tx_hash(event) and not str(tx_hash or "").strip():
+        raise ValueError("execution proof requires tx hash")
+    if execution_event_requires_bridge_guid(event) and not str(bridge_guid or "").strip():
+        raise ValueError("bridge-in-flight proof requires bridge guid")
     execution = Execution.objects.select_for_update().get(id=execution_id)
     existing = ExecutionEvent.objects.filter(idempotency_key=idempotency_key).first()
     if existing:
