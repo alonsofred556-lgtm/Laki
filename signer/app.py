@@ -50,7 +50,14 @@ def sign_intent(payload: SignIntent, authorization: str | None = Header(default=
             raise ValueError
     except ValueError as exc:
         raise HTTPException(status_code=503, detail="signer allowlist is invalid") from exc
-    policy = SignerPolicy(mode=os.environ.get("CONI_EXECUTION_MODE", "disabled"), audit_approved=os.environ.get("CONI_SIGNER_AUDIT_APPROVED", "false").lower() == "true", allowed_recipients=allowlist, max_value_base_units=os.environ.get("SIGNER_MAX_VALUE_BASE_UNITS", "0"))
+    policy = SignerPolicy(
+        mode=os.environ.get("CONI_EXECUTION_MODE", "disabled"),
+        audit_approved=os.environ.get("CONI_SIGNER_AUDIT_APPROVED", "false").lower() == "true",
+        allowed_recipients=allowlist,
+        max_value_base_units=os.environ.get("SIGNER_MAX_VALUE_BASE_UNITS", "0"),
+        max_total_value_base_units=os.environ.get("SIGNER_MAX_TOTAL_VALUE_BASE_UNITS")
+        or os.environ.get("SIGNER_MAX_VALUE_BASE_UNITS", "0"),
+    )
     try:
         validated = policy.validate(payload.model_dump())
     except (PolicyError, ValueError, TypeError) as exc:

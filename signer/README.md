@@ -36,7 +36,7 @@ For realized profit, use `/api/internal/signer/profit-settlement-event`. A
 recipient, USDG token, `robinhood` chain, and base-unit amount. Coni credits
 the user's ledger only after that proof-bound callback.
 
-The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), and `SIGNER_MAX_VALUE_BASE_UNITS` through Railway Variables or a secret manager. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing.
+The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), `SIGNER_MAX_VALUE_BASE_UNITS`, and (optionally) `SIGNER_MAX_TOTAL_VALUE_BASE_UNITS` through Railway Variables or a secret manager. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, aggregate amount cap, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing.
 
 For the provisioning transport, configure the private signer with
 `SIGNER_DJANGO_API_URL` (the private Django base URL) and
