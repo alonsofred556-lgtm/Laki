@@ -470,6 +470,10 @@
       }
       const result = await response.json();
       botWalletSnapshot = result;
+      if (result.botControl?.walletMode === "external-bot" || result.botControl?.walletMode === "internal-bot") {
+        preferredBotMode = result.botControl.walletMode;
+        localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      }
       await loadPangeaTokenRegistry();
       const currentChain = state.solana?.authenticated ? "solana" : state.evm?.chain || result.currentChain;
       const choices = botWalletChoices();

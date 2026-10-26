@@ -27,6 +27,7 @@ from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
 from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletProvisionRequest, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
 from .bot_wallets import bot_wallet_payload, bot_wallet_summary, chain_accessible, claim_provision_requests, create_bot_transfer, ensure_bot_wallet, ensure_bot_wallets, record_bot_transfer_event
+from .bot_controls import BOT_MODES, effective_user_policy, ensure_user_bot_control
 from .execution import create_execution_from_opportunity, execution_payload, record_execution_event, signer_intent_payload
 from .arbitrage import fresh_user_quotes
 from .pangea import PangeaError, request_json, scan_opportunities, token_registry_snapshot
@@ -192,6 +193,11 @@ def bot_status():
     return {"mode": settings.CONI_EXECUTION_MODE, "executionReady": execution_ready(), "database": True, "enabled": control.enabled, "paused": control.paused, "minNetBps": control.min_net_bps, "maxNotionalUsd": float(control.max_notional_usd), "signerConfigured": bool(settings.CONI_SIGNER_URL), "signerAuditApproved": settings.CONI_SIGNER_AUDIT_APPROVED, "feeConfigConfigured": bool(recipients), "quoteRequired": settings.CONI_ARBITRAGE_REQUIRE_QUOTES, "riskBufferBps": settings.CONI_ARBITRAGE_RISK_BUFFER_BPS, "profitSettlement": {"enabled": settings.CONI_PROFIT_SETTLEMENT_ENABLED, "asset": settings.CONI_PROFIT_SETTLEMENT_ASSET, "chain": settings.CONI_PROFIT_SETTLEMENT_CHAIN, "tokenConfigured": bool(settings.CONI_PROFIT_SETTLEMENT_TOKEN_ADDRESS), "decimalsConfigured": settings.CONI_PROFIT_SETTLEMENT_DECIMALS is not None}}
 
 
+def user_bot_status(identity):
+    control, _ = BotControl.objects.get_or_create(scope="global")
+    return effective_user_policy(identity, control)
+
+
 def health(request):
     database = False
     try:
@@ -331,9 +337,14 @@ def bot_wallet_provision(request):
         identity = require_session(request)
         data = body(request)
         mode = str(data.get("mode", "external-bot"))
+        if mode not in BOT_MODES or set(data) - {"mode"}:
+            return error("invalid bot wallet mode", 400, request)
         wallets = ensure_bot_wallets(identity, mode=mode)
+        user_control = ensure_user_bot_control(identity)
+        user_control.wallet_mode = mode
+        user_control.save(update_fields=["wallet_mode", "updated_at"])
         current = next(item for item in wallets if item.chain == identity.chain)
-        return api_response({"wallet": bot_wallet_payload(current), "wallets": [bot_wallet_payload(item) for item in wallets], "message": "The bot wallet records exist, but real addresses require the audited signer/MPC provisioner. No private key is generated or stored by Coni."}, 200, request)
+        return api_response({"wallet": bot_wallet_payload(current), "wallets": [bot_wallet_payload(item) for item in wallets], "botControl": user_bot_status(identity), "message": "The bot wallet records exist, but real addresses require the audited signer/MPC provisioner. No private key is generated or stored by Coni."}, 200, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -867,6 +878,49 @@ def bot_status_view(request):
 
 
 @csrf_exempt
+def user_bot_config(request):
+    if request.method not in {"GET", "POST"} or (request.method == "POST" and not post_allowed(request)):
+        return error("method or origin not allowed", 405 if request.method not in {"GET", "POST"} else 403, request)
+    try:
+        identity = require_session(request)
+        control = ensure_user_bot_control(identity)
+        if request.method == "POST":
+            data = body(request)
+            allowed = {"enabled", "paused", "walletMode", "minNetBps", "maxNotionalUsd"}
+            if set(data) - allowed:
+                return error("unexpected bot-control fields", 400, request)
+            global_control, _ = BotControl.objects.get_or_create(scope="global")
+            if "enabled" in data and not isinstance(data["enabled"], bool):
+                return error("enabled must be boolean", 400, request)
+            if "paused" in data and not isinstance(data["paused"], bool):
+                return error("paused must be boolean", 400, request)
+            if "walletMode" in data and data["walletMode"] not in BOT_MODES:
+                return error("invalid wallet mode", 400, request)
+            if "minNetBps" in data:
+                value = int(data["minNetBps"])
+                if value < global_control.min_net_bps or value > 10_000:
+                    return error("minimum edge can only be as strict as the global policy", 400, request)
+                control.min_net_bps = value
+            if "maxNotionalUsd" in data:
+                value = Decimal(str(data["maxNotionalUsd"]))
+                if value <= 0 or value > global_control.max_notional_usd:
+                    return error("maximum notional can only be as strict as the global policy", 400, request)
+                control.max_notional_usd = value
+            if "enabled" in data:
+                control.enabled = data["enabled"]
+            if "paused" in data:
+                control.paused = data["paused"]
+            if "walletMode" in data:
+                control.wallet_mode = data["walletMode"]
+            control.save()
+        return api_response(user_bot_status(identity), 200, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
+    except (ValueError, InvalidOperation, json.JSONDecodeError):
+        return error("invalid bot-control policy", 400, request)
+
+
+@csrf_exempt
 def bot_config(request):
     if request.method != "POST" or not ops_allowed(request):
         return error("operations authorization required", 403, request)
@@ -1013,18 +1067,23 @@ def execution_plan(request):
         status = bot_status()
         if not status["executionReady"] or status["paused"] or not status["enabled"]:
             return api_response({"error": "execution is gated", "status": status, "next": "Configure Postgres, the signer, fee recipients, risk policy, and explicit live approval."}, 409, request)
+        user_policy = user_bot_status(identity)
+        if not user_policy["enabled"] or user_policy["paused"]:
+            return api_response({"error": "this wallet's bot is paused", "status": {**status, "userBot": user_policy}}, 409, request)
         try:
             opportunity = ArbitrageOpportunity.objects.get(id=opportunity_id)
         except (ArbitrageOpportunity.DoesNotExist, ValueError, TypeError):
             return error("opportunity not found", 404, request)
-        bot_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.buy_chain, mode="external-bot", status="active").first()
-        sell_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.sell_chain, mode="external-bot", status="active").first()
+        bot_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.buy_chain, mode=user_policy["walletMode"], status="active").first()
+        sell_wallet = BotWallet.objects.filter(owner=identity, chain=opportunity.sell_chain, mode=user_policy["walletMode"], status="active").first()
         if not bot_wallet or not bot_wallet.address or not sell_wallet or not sell_wallet.address:
             return api_response({"error": "user bot wallets are not provisioned on both route chains", "status": status, "botWallet": bot_wallet_payload(bot_wallet) if bot_wallet else None, "sellBotWallet": bot_wallet_payload(sell_wallet) if sell_wallet else None, "next": "Provision active audited signer/MPC bot wallets on the buy and sell chains before execution."}, 409, request)
         try:
             fresh = fresh_user_quotes(opportunity, buy_wallet=bot_wallet.address, sell_wallet=sell_wallet.address)
         except PangeaError as exc:
             return api_response({"error": "fresh opportunity quote rejected", "reason": str(exc), "status": status}, 409, request)
+        if fresh.get("netBps", 0) < user_policy["minNetBps"] or Decimal(str(fresh.get("notionalUsd", "0"))) > Decimal(str(user_policy["maxNotionalUsd"])):
+            return api_response({"error": "route does not meet this wallet's policy", "status": {**status, "userBot": user_policy}}, 409, request)
         execution = create_execution_from_opportunity(identity=identity, opportunity_id=opportunity.id, bot_wallet=bot_wallet, sell_bot_wallet=sell_wallet, decision=fresh, quote_hash=fresh["quoteHash"])
         return api_response({"execution": execution_payload(execution), "next": "The signer adapter must independently validate and sign the exact Pangea transaction steps."}, 202, request)
     except PermissionError as exc:

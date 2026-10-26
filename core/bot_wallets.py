@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from .audit import record_event
 from .assets import asset_decimals, supported_asset
+from .bot_controls import ensure_user_bot_control
 from .funding import account_for, ledger_balance
 from .models import BotWallet, BotWalletProvisionRequest, BotWalletTransfer, BotWalletTransferEvent, Execution, LedgerAccount, LedgerEntry, WalletIdentity
 
@@ -170,6 +171,7 @@ def bot_wallet_summary(identity, selected_wallet_id=None):
     # Keep the read endpoint self-healing for sessions created before the
     # five-chain provisioning behavior was introduced.
     ensure_bot_wallets(identity, mode="external-bot")
+    user_control = ensure_user_bot_control(identity)
     wallets = BotWallet.objects.filter(owner=identity).order_by("chain", "mode")
     executions = Execution.objects.filter(user_identity=identity).order_by("-created_at")
     realized = sum((item.realized_profit_usd or Decimal("0") for item in executions if item.state == "settled"), Decimal("0"))
@@ -198,6 +200,13 @@ def bot_wallet_summary(identity, selected_wallet_id=None):
     current = next((item for item in payload_wallets if item["chain"] == identity.chain and item["mode"] == "external-bot"), None)
     return {
         "currentChain": identity.chain,
+        "botControl": {
+            "walletMode": user_control.wallet_mode,
+            "enabled": user_control.enabled,
+            "paused": user_control.paused,
+            "minNetBps": user_control.min_net_bps,
+            "maxNotionalUsd": str(user_control.max_notional_usd),
+        },
         "currentWallet": current,
         "selectedWalletId": str(selected.id) if selected else None,
         "wallets": payload_wallets,

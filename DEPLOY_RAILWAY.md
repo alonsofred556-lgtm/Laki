@@ -65,7 +65,7 @@ python manage.py migrate
 python manage.py check --deploy
 ```
 
-The migration creates wallet challenges, identities, per-chain bot-wallet records, bot-isolated ledger accounts, funding intents, deposit observations, chain cursors, audit events, reconciliation runs, withdrawal requests, fee events, bot controls, opportunities, settlements, and execution records.
+The migration creates wallet challenges, identities, per-chain bot-wallet records, bot-isolated ledger accounts, funding intents, deposit observations, chain cursors, audit events, reconciliation runs, withdrawal requests, global and user-scoped bot controls, opportunities, settlements, and execution records.
 
 ## Funding verification worker
 
@@ -114,7 +114,8 @@ python manage.py plan_arbitrage_executions --loop-seconds 30 --max-plans 10
 ```
 
 This worker requires `CONI_EXECUTION_MODE=live`, an approved signer, an
-enabled and unpaused bot control, active per-user bot wallets, and a positive
+enabled and unpaused global and user bot control, active per-user bot wallets
+in the user-selected external or internal mode, and a positive
 native-asset ledger balance on both route wallets. It fetches fresh Pangea
 trade and bridge quotes for each user, stores a hash-bound execution plan, and
 stops when the route no longer clears the net-profit policy. It does not sign,

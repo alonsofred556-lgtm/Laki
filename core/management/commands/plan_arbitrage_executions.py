@@ -7,15 +7,17 @@ submit idempotent lifecycle events.
 """
 
 import time
+from decimal import Decimal
 
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
 from core.arbitrage import fresh_user_quotes
 from core.assets import native_asset
+from core.bot_controls import effective_user_policy
 from core.execution import create_execution_from_opportunity
 from core.funding import account_for, ledger_balance
-from core.models import ArbitrageOpportunity, BotWallet, WalletIdentity
+from core.models import ArbitrageOpportunity, BotControl, BotWallet, WalletIdentity
 from core.pangea import PangeaError
 from core.views import bot_status
 
@@ -47,24 +49,29 @@ class Command(BaseCommand):
         ).order_by("-net_bps", "-detected_at")[: max(1, max_plans * 4)]
         planned = 0
         skipped = 0
+        global_control = BotControl.objects.get_or_create(scope="global")[0]
         for opportunity in opportunities:
             if planned >= max_plans:
                 break
             identities = WalletIdentity.objects.filter(
                 bot_wallets__chain=opportunity.buy_chain,
-                bot_wallets__mode="external-bot",
+                bot_wallets__mode__in=("external-bot", "internal-bot"),
                 bot_wallets__status="active",
             ).distinct()
             for identity in identities:
                 if planned >= max_plans:
                     break
+                user_policy = effective_user_policy(identity, global_control)
+                if not user_policy["enabled"] or user_policy["paused"]:
+                    skipped += 1
+                    continue
                 buy_wallet = BotWallet.objects.filter(
                     owner=identity, chain=opportunity.buy_chain,
-                    mode="external-bot", status="active",
+                    mode=user_policy["walletMode"], status="active",
                 ).first()
                 sell_wallet = BotWallet.objects.filter(
                     owner=identity, chain=opportunity.sell_chain,
-                    mode="external-bot", status="active",
+                    mode=user_policy["walletMode"], status="active",
                 ).first()
                 if not buy_wallet or not sell_wallet or not buy_wallet.address or not sell_wallet.address:
                     skipped += 1
@@ -78,6 +85,9 @@ class Command(BaseCommand):
                         buy_wallet=buy_wallet.address,
                         sell_wallet=sell_wallet.address,
                     )
+                    if decision.get("netBps", 0) < user_policy["minNetBps"] or Decimal(str(decision.get("notionalUsd", "0"))) > Decimal(str(user_policy["maxNotionalUsd"])):
+                        skipped += 1
+                        continue
                     create_execution_from_opportunity(
                         identity=identity,
                         opportunity_id=opportunity.id,

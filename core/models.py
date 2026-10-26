@@ -289,6 +289,21 @@ class BotControl(models.Model):
         db_table = "bot_controls"
 
 
+class UserBotControl(models.Model):
+    """Per-identity bot preference; the global operator gate still wins."""
+
+    owner = models.OneToOneField(WalletIdentity, primary_key=True, on_delete=models.PROTECT, related_name="bot_control", db_column="owner_id")
+    wallet_mode = models.CharField(max_length=24, default="external-bot")
+    enabled = models.BooleanField(default=True)
+    paused = models.BooleanField(default=False)
+    min_net_bps = models.IntegerField(default=100)
+    max_notional_usd = models.DecimalField(max_digits=30, decimal_places=8, default=25)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "user_bot_controls"
+
+
 class Execution(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_identity = models.ForeignKey(WalletIdentity, null=True, on_delete=models.PROTECT, db_column="user_identity_id")

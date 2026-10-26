@@ -32,6 +32,7 @@ urlpatterns = [
     path("withdrawals/request", views.withdrawal_request),
     path("withdrawals/status/<uuid:withdrawal_id>", views.withdrawal_status),
     path("bot/status", views.bot_status_view),
+    path("bot/control", views.user_bot_config),
     path("bot/config", views.bot_config),
     path("bot/pause", views.bot_pause),
     path("bot/scan", views.bot_scan),
