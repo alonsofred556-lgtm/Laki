@@ -32,11 +32,22 @@ def profit_settlement_ledger_anomalies(settlement, *, settlement_entry_count):
     return []
 
 
+def can_release_expired_withdrawal(*, status, reservation_count):
+    """Only release a timed-out request when its reservation is intact."""
+    return status == "pending-approval" and reservation_count == 1
+
+
 def release_expired_withdrawals(now=None):
     """Release reservations for requests that never reached signer approval."""
     now = now or timezone.now()
     released = 0
     for withdrawal in WithdrawalRequest.objects.filter(status="pending-approval", expires_at__lte=now).only("id"):
+        reservation_count = LedgerEntry.objects.filter(
+            reference_type="withdrawal-reservation",
+            reference_id=str(withdrawal.id),
+        ).count()
+        if not can_release_expired_withdrawal(status="pending-approval", reservation_count=reservation_count):
+            continue
         current = release_withdrawal(withdrawal.id, "expired")
         if current.status == "released":
             released += 1

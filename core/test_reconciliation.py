@@ -9,15 +9,23 @@ from django.test import SimpleTestCase
 
 django.setup()
 
-from .reconciliation import bot_transfer_ledger_anomalies, profit_settlement_ledger_anomalies, release_expired_withdrawals
+from .reconciliation import bot_transfer_ledger_anomalies, can_release_expired_withdrawal, profit_settlement_ledger_anomalies, release_expired_withdrawals
 
 
 class ReconciliationInvariantTests(SimpleTestCase):
+    def test_expiry_release_requires_exactly_one_reservation(self):
+        self.assertTrue(can_release_expired_withdrawal(status="pending-approval", reservation_count=1))
+        self.assertFalse(can_release_expired_withdrawal(status="pending-approval", reservation_count=0))
+        self.assertFalse(can_release_expired_withdrawal(status="pending-approval", reservation_count=2))
+        self.assertFalse(can_release_expired_withdrawal(status="submitted", reservation_count=1))
+
     @patch("core.reconciliation.record_event")
     @patch("core.reconciliation.release_withdrawal")
+    @patch("core.reconciliation.LedgerEntry.objects")
     @patch("core.reconciliation.WithdrawalRequest.objects")
-    def test_expiry_pass_releases_only_pending_approval_requests(self, manager, release, record):
+    def test_expiry_pass_releases_only_pending_approval_requests(self, manager, ledger_manager, release, record):
         manager.filter.return_value.only.return_value = [SimpleNamespace(id="withdrawal-1")]
+        ledger_manager.filter.return_value.count.return_value = 1
         release.return_value = SimpleNamespace(status="released")
         self.assertEqual(release_expired_withdrawals(), 1)
         manager.filter.assert_called_once()
