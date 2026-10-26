@@ -28,3 +28,4 @@ Open `http://127.0.0.1:4173/` for the website and `http://127.0.0.1:4173/wallet.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [backend/README.md](backend/README.md) before adding wallet signing or execution.
 # ClickOt
+# Laki
