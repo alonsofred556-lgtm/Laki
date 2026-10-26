@@ -11,6 +11,8 @@
   const EVM_PROVIDER_KEY = "coni.wallet.evm-provider.v1";
   const SOLANA_PROVIDER_KEY = "coni.wallet.solana-provider.v1";
   const announcedEvmProviders = new Map();
+  const pangeaTokens = new Map();
+  let pangeaTokensLoadedAt = 0;
   const $ = (selector) => document.querySelector(selector);
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
   const chainNames = { 1: "Ethereum", 8453: "Base", 4663: "Robinhood Chain", 56: "BNB Chain" };
@@ -146,6 +148,44 @@
       logo.hidden = false;
       $("#zgap-logo-fallback").hidden = true;
     } catch { /* the monogram remains a safe local fallback */ }
+  }
+
+  function tokenLogoUrl(image) {
+    if (typeof image !== "string" || !image) return "";
+    if (/^https?:\/\//i.test(image)) return image;
+    const match = image.match(/^ipfs:\/\/([^/]+)(?:\/.*)?$/i);
+    return match ? `https://www.pangea.trade/api/logo/${encodeURIComponent(match[1])}/128.webp` : "";
+  }
+
+  async function loadPangeaTokenRegistry() {
+    if (Date.now() - pangeaTokensLoadedAt < 45_000) return;
+    try {
+      const response = await fetch(config.tokenRegistryUrl, { headers: { Accept: "application/json" }, cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      const tokens = Array.isArray(result.tokens) ? result.tokens : [];
+      pangeaTokens.clear();
+      tokens.forEach((item) => {
+        if (item?.slug) pangeaTokens.set(String(item.slug).toLowerCase(), item);
+      });
+      pangeaTokensLoadedAt = Date.now();
+    } catch { /* history keeps its ticker fallback when the live feed is unavailable */ }
+  }
+
+  function tokenChip(item) {
+    const slug = String(item?.slug || "");
+    const meta = pangeaTokens.get(slug.toLowerCase()) || {};
+    const symbol = String(meta.symbol || item?.symbol || slug || "TOKEN").toUpperCase();
+    const image = tokenLogoUrl(meta.image || meta.logoURI || meta.logoUrl);
+    const fallback = esc(symbol.slice(0, 4));
+    const logo = image
+      ? `<img class="token-logo-image" src="${esc(image)}" alt="" loading="lazy" referrerpolicy="no-referrer" data-token-fallback="${fallback}" />`
+      : fallback;
+    return `<span class="network-pill token-pill"><b>${logo}</b><span>${esc(symbol)}</span></span>`;
+  }
+
+  function wireTokenLogoFallbacks() {
+    document.querySelectorAll("#bot-wallet-history img[data-token-fallback]").forEach((image) => image.addEventListener("error", () => image.replaceWith(document.createTextNode(image.dataset.tokenFallback || "TOKEN")), { once: true }));
   }
 
   async function readEvmBalance(provider, address) {
@@ -365,8 +405,9 @@
     $("#bot-wallet-state").textContent = wallet.status === "active" ? "ACTIVE" : "GATED";
     const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";
     $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
-    const tokens = (botWalletSnapshot?.tradedTokens || []).map((item) => `<span class="network-pill">${esc(item.slug)}</span>`).join(" ") || "No completed token trades";
+    const tokens = (botWalletSnapshot?.tradedTokens || []).map(tokenChip).join(" ") || "No completed token trades";
     $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(botWalletSnapshot?.pnl?.realizedUsd || "0")}</b><small>${esc(botWalletSnapshot?.pnl?.settledTrades || 0)} settled trades · ${esc(botWalletSnapshot?.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (botWalletSnapshot?.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+    wireTokenLogoFallbacks();
   }
 
   function selectBotWallet(walletId) {
@@ -391,6 +432,7 @@
       }
       const result = await response.json();
       botWalletSnapshot = result;
+      await loadPangeaTokenRegistry();
       const currentChain = state.solana?.authenticated ? "solana" : state.evm?.chain || result.currentChain;
       const choices = botWalletChoices();
       activeBotWallet = choices.find((item) => walletId && item.id === walletId) || choices.find((item) => item.chain === currentChain) || result.currentWallet || choices[0] || null;
