@@ -153,7 +153,7 @@ def _bot_balance(wallet, asset=None):
     return rows
 
 
-def bot_wallet_summary(identity):
+def bot_wallet_summary(identity, selected_wallet_id=None):
     # Keep the read endpoint self-healing for sessions created before the
     # five-chain provisioning behavior was introduced.
     ensure_bot_wallets(identity, mode="external-bot")
@@ -161,8 +161,23 @@ def bot_wallet_summary(identity):
     executions = Execution.objects.filter(user_identity=identity).order_by("-created_at")
     realized = sum((item.realized_profit_usd or Decimal("0") for item in executions if item.state == "settled"), Decimal("0"))
     expected = sum((item.expected_profit_usd or Decimal("0") for item in executions), Decimal("0"))
-    tokens = list(executions.values("slug").annotate(trades=Sum("expected_profit_usd")))
-    transfers = BotWalletTransfer.objects.filter(owner=identity).order_by("-created_at")[:50]
+    selected = next((wallet for wallet in wallets if selected_wallet_id and str(wallet.id) == str(selected_wallet_id)), None)
+    if selected is None:
+        selected = next((wallet for wallet in wallets if wallet.chain == identity.chain and wallet.mode == "external-bot"), None)
+    selected_executions = executions.filter(bot_wallet=selected) if selected else executions.none()
+    selected_realized = sum((item.realized_profit_usd or Decimal("0") for item in selected_executions if item.state == "settled"), Decimal("0"))
+    selected_expected = sum((item.expected_profit_usd or Decimal("0") for item in selected_executions), Decimal("0"))
+    selected_tokens = list(selected_executions.values("slug").annotate(trades=Sum("expected_profit_usd")))
+    transfer_query = BotWalletTransfer.objects.filter(owner=identity)
+    transfers = transfer_query.order_by("-created_at")[:50]
+    selected_transfers = transfer_query.filter(bot_wallet=selected).order_by("-created_at")[:50] if selected else transfer_query.none()
+    selected_history = [
+        {"id": str(item.id), "kind": "trade", "slug": item.slug, "state": item.state, "expectedProfitUsd": str(item.expected_profit_usd or 0), "realizedProfitUsd": str(item.realized_profit_usd or 0), "createdAt": item.created_at.isoformat()}
+        for item in selected_executions[:50]
+    ] + [
+        {"id": str(item.id), "kind": item.direction, "asset": item.asset, "chain": item.chain, "amountBaseUnits": str(item.amount_base_units), "state": item.state, "txHash": item.tx_hash or None, "createdAt": item.created_at.isoformat()}
+        for item in selected_transfers
+    ]
     payload_wallets = [
             {**bot_wallet_payload(wallet), "balances": _bot_balance(wallet)}
             for wallet in wallets
@@ -171,16 +186,12 @@ def bot_wallet_summary(identity):
     return {
         "currentChain": identity.chain,
         "currentWallet": current,
+        "selectedWalletId": str(selected.id) if selected else None,
         "wallets": payload_wallets,
-        "pnl": {"realizedUsd": str(realized), "expectedUsd": str(expected), "settledTrades": executions.filter(state="settled").count()},
-        "tradedTokens": [{"slug": item["slug"], "expectedProfitUsd": str(item["trades"] or 0)} for item in tokens],
-        "history": [
-            {"id": str(item.id), "kind": "trade", "slug": item.slug, "state": item.state, "expectedProfitUsd": str(item.expected_profit_usd or 0), "realizedProfitUsd": str(item.realized_profit_usd or 0), "createdAt": item.created_at.isoformat()}
-            for item in executions[:50]
-        ] + [
-            {"id": str(item.id), "kind": item.direction, "asset": item.asset, "chain": item.chain, "amountBaseUnits": str(item.amount_base_units), "state": item.state, "txHash": item.tx_hash or None, "createdAt": item.created_at.isoformat()}
-            for item in transfers
-        ],
+        "pnl": {"realizedUsd": str(selected_realized), "expectedUsd": str(selected_expected), "settledTrades": selected_executions.filter(state="settled").count()},
+        "overallPnl": {"realizedUsd": str(realized), "expectedUsd": str(expected), "settledTrades": executions.filter(state="settled").count()},
+        "tradedTokens": [{"slug": item["slug"], "expectedProfitUsd": str(item["trades"] or 0)} for item in selected_tokens],
+        "history": selected_history,
     }
 
 

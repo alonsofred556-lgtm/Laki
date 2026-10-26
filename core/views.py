@@ -319,7 +319,7 @@ def bot_wallet_view(request):
         identity = require_session(request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
-    return api_response(bot_wallet_summary(identity), 200, request)
+    return api_response(bot_wallet_summary(identity, request.GET.get("walletId")), 200, request)
 
 
 @csrf_exempt

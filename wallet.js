@@ -375,11 +375,13 @@
     activeBotWallet = wallet;
     renderBotWalletChoices();
     renderBotWalletSummary();
+    loadBotWallet(wallet.id);
   }
 
-  async function loadBotWallet() {
+  async function loadBotWallet(walletId = null) {
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet`, { credentials: "include", cache: "no-store" });
+      const query = walletId ? `?walletId=${encodeURIComponent(walletId)}` : "";
+      const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet${query}`, { credentials: "include", cache: "no-store" });
       if (response.status === 401) {
         botWalletSnapshot = null;
         activeBotWallet = null;
@@ -391,7 +393,7 @@
       botWalletSnapshot = result;
       const currentChain = state.solana?.authenticated ? "solana" : state.evm?.chain || result.currentChain;
       const choices = botWalletChoices();
-      activeBotWallet = choices.find((item) => item.chain === currentChain) || result.currentWallet || choices[0] || null;
+      activeBotWallet = choices.find((item) => walletId && item.id === walletId) || choices.find((item) => item.chain === currentChain) || result.currentWallet || choices[0] || null;
       renderBotWalletChoices();
       renderBotWalletSummary();
       if (!activeBotWallet) return;
