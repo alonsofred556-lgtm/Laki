@@ -43,7 +43,8 @@ class DjangoSignerClient:
     _evm_address = re.compile(r"^0x[a-fA-F0-9]{40}$")
     _solana_address = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
     _hash = re.compile(r"^(0x)?[a-fA-F0-9]{64}$")
-    _key_ref = re.compile(r"^[A-Za-z0-9._:-]{8,256}$")
+    _key_ref = re.compile(r"^[A-Za-z0-9._:/-]{8,128}$")
+    _uuid = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 
     def __init__(
         self,
@@ -113,7 +114,7 @@ class DjangoSignerClient:
             raise DjangoSignerClientError("Django signer callback returned invalid JSON") from exc
         if not isinstance(decoded, dict):
             raise DjangoSignerClientError("Django signer callback returned an invalid object")
-        if not decoded.get("ok", True) and decoded.get("error"):
+        if decoded.get("error") or decoded.get("ok") is False:
             raise DjangoSignerClientError("Django signer callback rejected the request")
         return decoded
 
@@ -144,8 +145,10 @@ class DjangoSignerClient:
             if not isinstance(row, dict) or set(row) - allowed:
                 raise DjangoSignerClientError("provision response contains unexpected fields")
             chain = str(row.get("chain", ""))
-            if chain not in self._chains or not row.get("provisionRequestId") or not row.get("botWalletId") or not row.get("ownerId"):
+            if chain not in self._chains or not self._uuid.fullmatch(str(row.get("provisionRequestId", ""))) or not self._uuid.fullmatch(str(row.get("botWalletId", ""))) or not self._uuid.fullmatch(str(row.get("ownerId", ""))):
                 raise DjangoSignerClientError("provision response contains invalid identifiers")
+            if str(row.get("mode", "")) not in {"external-bot", "internal-bot"}:
+                raise DjangoSignerClientError("provision response contains an invalid wallet mode")
             source = row.get("sourceAddress")
             if source is not None and (not isinstance(source, str) or not self._address_valid(chain, source)):
                 raise DjangoSignerClientError("provision response contains an invalid source address")
@@ -174,6 +177,8 @@ class DjangoSignerClient:
         signer_key_ref: str,
         attestation_hash: str,
     ) -> dict[str, Any]:
+        if not self._uuid.fullmatch(str(provision_request_id)) or not self._uuid.fullmatch(str(bot_wallet_id)):
+            raise ValueError("invalid signer provisioning identifiers")
         if chain not in self._chains:
             raise ValueError("unsupported signer chain")
         if not self._address_valid(chain, address):

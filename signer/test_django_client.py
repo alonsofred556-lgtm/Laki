@@ -39,8 +39,8 @@ class DjangoSignerClientTests(unittest.TestCase):
         client = DjangoSignerClient("https://coni.internal", "s" * 32, clock=lambda: 1700000000, opener=opener)
 
         result = client.attest_bot_wallet(
-            provision_request_id="request-1",
-            bot_wallet_id="wallet-1",
+            provision_request_id="00000000-0000-4000-8000-000000000001",
+            bot_wallet_id="00000000-0000-4000-8000-000000000002",
             chain="base",
             address="0x1111111111111111111111111111111111111111",
             signer_key_ref="hsm:key:wallet-1",
@@ -61,14 +61,21 @@ class DjangoSignerClientTests(unittest.TestCase):
         with self.assertRaises(DjangoSignerClientError):
             client.pull_provision_requests()
 
+    def test_django_error_object_fails_closed(self):
+        opener = Mock(return_value=FakeResponse({"error": "unauthorized"}))
+        client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
+
+        with self.assertRaises(DjangoSignerClientError):
+            client.pull_provision_requests()
+
     def test_invalid_attestation_is_rejected_before_network(self):
         opener = Mock(return_value=FakeResponse({"ok": True}))
         client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
 
         with self.assertRaises(ValueError):
             client.attest_bot_wallet(
-                provision_request_id="request-1",
-                bot_wallet_id="wallet-1",
+                provision_request_id="00000000-0000-4000-8000-000000000001",
+                bot_wallet_id="00000000-0000-4000-8000-000000000002",
                 chain="base",
                 address="not-an-address",
                 signer_key_ref="hsm:key:wallet-1",
