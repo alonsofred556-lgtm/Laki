@@ -7,18 +7,19 @@ Create two Railway services in the same project:
 1. Coni web/API service from this repository.
 2. Railway PostgreSQL service.
 
-The web service uses `npm start` and receives Railway's `PORT` automatically.
+The web service uses Gunicorn with Django and receives Railway's `PORT` automatically. The old Node server is retained only as a migration fallback; it is not the Railway entrypoint.
 
 ## Required variables
 
 Set these on the Coni service. Generate secrets outside the repository:
 
 ```text
-NODE_ENV=production
+DJANGO_DEBUG=false
+DJANGO_SECRET_KEY=<at least 50 random characters>
+DJANGO_ALLOWED_HOSTS=laki-production.up.railway.app
 CONI_ALLOWED_ORIGINS=https://laki-production.up.railway.app
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 DATABASE_SSL=require
-CONI_SESSION_SECRET=<at least 32 random characters>
 CONI_AUTH_DOMAIN=laki-production.up.railway.app
 CONI_AUTH_URI=https://laki-production.up.railway.app
 CONI_OPS_TOKEN=<separate random operations token>
@@ -39,8 +40,9 @@ Do not use zero addresses, burn addresses, user wallet addresses, or example val
 Run once against the Railway PostgreSQL service from a trusted environment:
 
 ```text
-npm install
-npm run db:migrate
+python -m pip install -r requirements.lock
+python manage.py migrate
+python manage.py check --deploy
 ```
 
 The migration creates wallet challenges, identities, ledger accounts, funding intents, fee events, bot controls, and execution records.
@@ -61,7 +63,7 @@ Run the MCP operations process separately with the same API URL and operations t
 ```text
 $env:CONI_API_URL="https://laki-production.up.railway.app"
 $env:CONI_OPS_TOKEN="<same operations token>"
-npm run mcp
+python mcp/operations_server.py
 ```
 
 The MCP server can inspect health, scan opportunities, view profit summaries, read fee configuration, and pause the bot. It intentionally has no withdrawal or signing tool.

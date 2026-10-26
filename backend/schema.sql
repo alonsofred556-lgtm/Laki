@@ -1,3 +1,6 @@
+-- Legacy Node migration reference. Django is canonical; use `python manage.py migrate`.
+-- Do not apply this file to a Django database unless you have compared schemas.
+
 CREATE TABLE IF NOT EXISTS wallet_challenges (
   id UUID PRIMARY KEY,
   chain TEXT NOT NULL,

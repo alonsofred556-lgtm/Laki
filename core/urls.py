@@ -1,0 +1,27 @@
+from django.urls import path, re_path
+
+from . import views
+
+urlpatterns = [
+    path("health", views.health),
+    path("auth/challenge", views.auth_challenge),
+    path("auth/verify", views.auth_verify),
+    path("auth/session", views.auth_session),
+    path("auth/logout", views.auth_logout),
+    path("market/pools", views.market_pools),
+    path("market/token-meta", views.market_meta),
+    path("market/history", views.market_history),
+    path("market/bridge-activity", views.bridge_activity),
+    path("market/launches", views.market_launches),
+    path("market/trade-quote", lambda request: views.quote_proxy(request, "trade")),
+    path("market/bridge-quote", lambda request: views.quote_proxy(request, "bridge")),
+    path("funding/intent", views.funding_intent),
+    path("bot/status", views.bot_status_view),
+    path("bot/config", views.bot_config),
+    path("bot/pause", views.bot_pause),
+    path("bot/scan", views.bot_scan),
+    path("bot/profit", views.profit_summary),
+    path("fees/config", views.fees_config),
+    path("fees/accrue", views.fees_accrue),
+    path("execution/plan", views.execution_plan),
+]

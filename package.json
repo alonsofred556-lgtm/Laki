@@ -7,9 +7,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node backend/server.mjs",
-    "mcp": "node mcp/operations-server.mjs",
-    "db:migrate": "node backend/migrate.mjs"
+    "start": "gunicorn coni_backend.wsgi:application --bind 0.0.0.0:$PORT",
+    "dev": "python manage.py runserver 127.0.0.1:8000",
+    "mcp": "python mcp/operations_server.py",
+    "db:migrate": "python manage.py migrate",
+    "check": "python manage.py check --deploy",
+    "legacy:node": "node backend/server.mjs"
   },
   "dependencies": {
     "pg": "^8.16.3",

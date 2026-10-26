@@ -1,0 +1,9 @@
+base58==2.1.1
+dj-database-url==2.3.0
+Django==5.2.18
+eth-account==0.14.0
+gunicorn==23.0.0
+psycopg[binary]==3.3.6
+PyNaCl==1.6.2
+requests==2.34.2
+whitenoise==6.12.0

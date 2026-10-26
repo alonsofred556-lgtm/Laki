@@ -2,7 +2,7 @@
 
 ## Product shape
 
-Coni is a monitoring and execution surface for cross-chain opportunities on Pangea. The website is the full operations console. The Chrome extension is the fast scanner and approval handoff. Both should consume the same normalized opportunity model.
+Coni is a monitoring and execution surface for cross-chain opportunities on Pangea. The website is the full operations console. The Chrome extension is the fast scanner and approval handoff. Both should consume the same normalized opportunity model. Django is the canonical backend; the earlier Node boundary remains only as a migration fallback.
 
 ## Pangea facts used by this milestone
 
@@ -12,6 +12,7 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - Pangea exposes read-only pool data through `/api/pools` and documents `/trade/quote` as the route builder for future execution.
 - The backend also proxies `/history`, `/bridge/activity`, `/token/meta`, `/v1/launches`, `/trade/quote`, and `/bridge/quote`; quote responses are expiring, untrusted data and are never signed or broadcast by Coni.
 - A cross-chain transfer uses LayerZero OFT semantics and has its own fee and delivery risk. A bridge is not free inventory movement.
+- Pangea publishes the LayerZero endpoint IDs and returns the unsigned bridge transaction flow. Coni maps chain names to endpoint IDs for validation; the signer service must inspect and sign the exact Pangea-produced transaction.
 
 ## Production boundaries
 
@@ -39,6 +40,7 @@ Coni is a monitoring and execution surface for cross-chain opportunities on Pang
 - `ledger`: records quote, consent, transaction hashes, bridge messages, realized P&L, and failure reason.
 - `auth`: nonce-based EVM/Solana wallet ownership verification and short-lived sessions.
 - `mcp-operations`: fixed allowlist for health, scans, bot status, profit summaries, fee status, and pause/configuration; it cannot sign or withdraw.
+- `django-api`: canonical Python API, Postgres migrations, wallet authentication, Pangea proxy, fee accounting, and bot policy endpoints.
 - `signer-treasury`: separate private service, not included in this repository, responsible for policy-checked signing, withdrawals, fee sweeps, key ceremonies, and emergency recovery.
 
 ## First implementation gate

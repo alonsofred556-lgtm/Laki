@@ -1,6 +1,6 @@
 # Coni operations MCP server
 
-`operations-server.mjs` is a restricted Model Context Protocol process for operational visibility. It calls the Coni API through a fixed allowlist and requires `CONI_OPS_TOKEN`.
+`operations_server.py` is the canonical restricted Model Context Protocol process for operational visibility. It calls the Django API through a fixed allowlist and requires `CONI_OPS_TOKEN`. `operations-server.mjs` remains only as a legacy Node fallback.
 
 Available tools:
 

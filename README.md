@@ -6,17 +6,23 @@ This milestone ships a responsive website, a dedicated wallet control page, a Ch
 
 ## Run locally
 
-Serve this folder with any static web server, then open `index.html` through that server. For example:
+Install the Python dependencies, migrate the local development database, and run Django:
 
 ```text
-python -m http.server 4173
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.lock
+$env:DJANGO_DEBUG="true"
+$env:DJANGO_SECRET_KEY="local-development-secret"
+python manage.py migrate
+python manage.py runserver 127.0.0.1:8000
 ```
 
-Open `http://127.0.0.1:4173/` for the website and `http://127.0.0.1:4173/wallet.html` for the wallet page. For the API boundary, run `node backend/server.mjs`. The extension source is in `extension/`; load that folder as an unpacked extension in Chrome when you are ready to preview the popup.
+Open `http://127.0.0.1:8000/` for the website and `http://127.0.0.1:8000/wallet.html` for the wallet page. The extension source is in `extension/`; load that folder as an unpacked extension in Chrome when you are ready to preview the popup. Django is now the canonical backend; `backend/server.mjs` is retained only as a legacy migration fallback.
 
 ## Railway deployment
 
-Create a Railway service from this repository and a managed PostgreSQL service. The current deployment URL is `https://laki-production.up.railway.app`. Railway will use the `start` script in `package.json`; it injects `PORT`, and the server binds to `0.0.0.0`. Set `CONI_ALLOWED_ORIGINS` to `https://laki-production.up.railway.app`, configure all variables in `backend/env.example`, and use `/api/health` as the service health-check path. Run the migration once with `npm run db:migrate` against the Railway database. Keep `CONI_EXECUTION_MODE=disabled` until the signer and execution services have been independently audited.
+Create a Railway service from this repository and a managed PostgreSQL service. The current deployment URL is `https://laki-production.up.railway.app`. Railway uses `railway.toml` to start Gunicorn/Django and injects `PORT`. Set `DJANGO_ALLOWED_HOSTS`, `CONI_ALLOWED_ORIGINS`, and the variables in `backend/env.example`, then run `python manage.py migrate` once against the Railway database. Keep `CONI_EXECUTION_MODE=disabled` until the signer and execution services have been independently audited.
 
 ## Current scope
 
