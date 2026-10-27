@@ -12,11 +12,18 @@
     "mcp": "python mcp/operations_server.py",
     "db:migrate": "python manage.py migrate",
     "check": "python manage.py check --deploy",
+    "build:solana": "esbuild solana-funding.entry.js --bundle --format=iife --global-name=ConiSolanaBundle --outfile=assets/solana-funding.js --minify",
     "legacy:node": "node backend/server.mjs"
   },
   "dependencies": {
+    "@solana-program/token": "^0.18.0",
+    "@solana/signers": "^8.5.0",
+    "@solana/web3.js": "^3.1.1",
     "pg": "^8.16.3",
     "tweetnacl": "^1.0.3",
     "viem": "^2.37.4"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

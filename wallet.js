@@ -335,7 +335,10 @@
       if (!response.ok) throw new Error(result.error || "Funding intent rejected");
       activeIntent = result;
       $("#funding-status").textContent = `${result.botWalletId ? "Bot top-up: " : ""}Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}. Review the full destination in your wallet before approving.`;
-      $("#approve-funding").hidden = !(result.chain !== "solana" && state.evm?.provider && !state.evm?.restored);
+      $("#approve-funding").hidden = result.chain === "solana"
+        ? !(state.solana?.provider && !state.solana?.restored)
+        : !(state.evm?.provider && !state.evm?.restored);
+      $("#approve-funding").textContent = result.chain === "solana" ? "Approve in connected Solana wallet ↗" : "Approve in connected EVM wallet ↗";
       $("#funding-hash-row").hidden = false;
       $("#claim-funding").hidden = false;
     } catch {
@@ -349,9 +352,9 @@
     return BigInt(`${whole}${fraction.padEnd(decimals, "0")}`);
   }
 
-  async function claimFunding(txHash) {
+  async function claimFunding(txHash, eventIndex = 0) {
     if (!activeIntent || !txHash) throw new Error("Create a funding intent and provide a transaction hash first");
-    const response = await fetch(`${config.apiBaseUrl}/api/funding/claim`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ intentId: activeIntent.intentId, txHash }) });
+    const response = await fetch(`${config.apiBaseUrl}/api/funding/claim`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ intentId: activeIntent.intentId, txHash, eventIndex }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Funding claim rejected");
     $("#funding-status").textContent = "Transfer submitted for server verification. The ledger is credited only after finality is confirmed.";
@@ -385,7 +388,27 @@
   }
 
   async function approveFunding() {
-    if (!activeIntent || !state.evm?.provider || state.evm.restored) throw new Error("Reconnect the EVM wallet before approving");
+    if (!activeIntent) throw new Error("Create a funding intent before approving");
+    if (activeIntent.chain === "solana") {
+      if (!state.solana?.provider || state.solana.restored) throw new Error("Reconnect the Solana wallet before approving");
+      if (!window.ConiSolana?.sendFunding) throw new Error("The Solana transaction module is unavailable; refresh the page and try again");
+      $("#funding-status").textContent = "Reviewing the exact Solana destination, mint, and amount in your wallet…";
+      const result = await window.ConiSolana.sendFunding({
+        provider: state.solana.provider,
+        rpcUrl: config.solanaRpcUrl,
+        from: state.solana.address,
+        destination: activeIntent.destination,
+        amountBaseUnits: activeIntent.amountBaseUnits,
+        asset: activeIntent.asset,
+        tokenAddress: activeIntent.tokenAddress,
+        tokenProgram: activeIntent.tokenProgram,
+        decimals: activeIntent.decimals,
+      });
+      $("#funding-tx-hash").value = result.signature;
+      await claimFunding(result.signature, result.eventIndex);
+      return;
+    }
+    if (!state.evm?.provider || state.evm.restored) throw new Error("Reconnect the EVM wallet before approving");
     const expectedChainId = config.wallets.evmChains[activeIntent.chain];
     const actualChainId = Number.parseInt(await state.evm.provider.request({ method: "eth_chainId" }), 16);
     if (expectedChainId && actualChainId !== expectedChainId) throw new Error(`Switch the connected EVM wallet to ${chainNames[expectedChainId] || activeIntent.chain} before approving`);

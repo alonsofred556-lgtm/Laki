@@ -11,6 +11,7 @@ window.CONI_CONFIG = {
   tradeQuoteUrl: "/api/market/trade-quote",
   bridgeQuoteUrl: "/api/market/bridge-quote",
   launchesUrl: "/api/market/launches",
+  solanaRpcUrl: "https://api.mainnet-beta.solana.com",
   refreshMs: 15000,
   branding: {
     icon: "assets/coni_logo_icon-2.png",
