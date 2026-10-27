@@ -12,6 +12,7 @@
   const SOLANA_PROVIDER_KEY = "coni.wallet.solana-provider.v1";
   const announcedEvmProviders = new Map();
   const pangeaTokens = new Map();
+  const fundingAssets = new Map();
   let pangeaTokensLoadedAt = 0;
   const solanaProviderHandlers = new WeakMap();
   const $ = (selector) => document.querySelector(selector);
@@ -223,6 +224,7 @@
       saveConnections();
       renderConnections();
       message(`${state.evm.chainName} wallet connected.`, "success");
+      loadFundingAssets(chain);
       loadBotWallet();
       provider.on?.("accountsChanged", () => connectEvm());
       provider.on?.("chainChanged", () => connectEvm());
@@ -249,6 +251,7 @@
     state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
     saveConnections();
     renderConnections();
+    loadFundingAssets("solana");
     loadBotWallet();
   }
 
@@ -386,9 +389,19 @@
     const expectedChainId = config.wallets.evmChains[activeIntent.chain];
     const actualChainId = Number.parseInt(await state.evm.provider.request({ method: "eth_chainId" }), 16);
     if (expectedChainId && actualChainId !== expectedChainId) throw new Error(`Switch the connected EVM wallet to ${chainNames[expectedChainId] || activeIntent.chain} before approving`);
-    const value = `0x${toBaseUnits(activeIntent.amount, activeIntent.asset === "BNB" ? 18 : 18).toString(16)}`;
     $("#funding-status").textContent = "Reviewing the exact destination and amount in your wallet…";
-    const txHash = await state.evm.provider.request({ method: "eth_sendTransaction", params: [{ from: state.evm.address, to: activeIntent.destination, value }] });
+    const native = activeIntent.asset === (activeIntent.chain === "bsc" ? "BNB" : "ETH");
+    let transaction;
+    if (native) {
+      transaction = { from: state.evm.address, to: activeIntent.destination, value: `0x${BigInt(activeIntent.amountBaseUnits).toString(16)}` };
+    } else {
+      const tokenAddress = String(activeIntent.tokenAddress || "");
+      if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) throw new Error("The server did not provide a verified token contract for this funding asset");
+      const recipient = activeIntent.destination.slice(2).toLowerCase().padStart(64, "0");
+      const amount = BigInt(activeIntent.amountBaseUnits).toString(16).padStart(64, "0");
+      transaction = { from: state.evm.address, to: tokenAddress, value: "0x0", data: `0xa9059cbb${recipient}${amount}` };
+    }
+    const txHash = await state.evm.provider.request({ method: "eth_sendTransaction", params: [transaction] });
     $("#funding-tx-hash").value = txHash;
     await claimFunding(txHash);
   }
@@ -405,13 +418,39 @@
     return String(value ?? "—").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   }
 
-  function setNativeAssetOptions(chain) {
-    const asset = chain === "solana" ? "SOL" : chain === "bsc" ? "BNB" : "ETH";
-    [$("#funding-asset"), $("#bot-withdraw-asset")].forEach((select) => {
-      if (!select) return;
-      select.innerHTML = `<option value="${asset}">${asset}</option>`;
-      select.value = asset;
-    });
+  function renderFundingAssetOptions(chain) {
+    const native = chain === "solana" ? "SOL" : chain === "bsc" ? "BNB" : "ETH";
+    const fundingSelect = $("#funding-asset");
+    if (fundingSelect) {
+      const current = fundingSelect.value;
+      fundingSelect.replaceChildren();
+      if (!fundingAssets.size) fundingAssets.set(native, { asset: native, decimals: native === "SOL" ? 9 : 18, native: true });
+      fundingAssets.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.asset;
+        option.textContent = item.native ? item.asset : `${item.asset} token`;
+        fundingSelect.appendChild(option);
+      });
+      fundingSelect.value = fundingAssets.has(current) ? current : (fundingAssets.has(native) ? native : fundingSelect.options[0]?.value || "");
+    }
+    const withdrawalSelect = $("#bot-withdraw-asset");
+    if (withdrawalSelect) {
+      withdrawalSelect.innerHTML = `<option value="${native}">${native}</option>`;
+      withdrawalSelect.value = native;
+    }
+  }
+
+  async function loadFundingAssets(chain) {
+    fundingAssets.clear();
+    renderFundingAssetOptions(chain);
+    if (!chain) return;
+    try {
+      const response = await fetch(`${config.apiBaseUrl}/api/funding/assets?chain=${encodeURIComponent(chain)}`, { credentials: "include", cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      (result.assets || []).forEach((item) => fundingAssets.set(String(item.asset).toUpperCase(), item));
+      renderFundingAssetOptions(chain);
+    } catch { /* native asset remains available while the registry is unavailable */ }
   }
 
   function botWalletChoices() {
@@ -438,7 +477,7 @@
   function renderBotWalletSummary() {
     const wallet = activeBotWallet;
     if (!wallet) return;
-    setNativeAssetOptions(wallet.chain);
+    loadFundingAssets(wallet.chain);
     $("#internal-wallet-toggle").hidden = wallet.mode !== "internal-bot";
     $("#bot-wallet-state").textContent = wallet.status === "active" ? "ACTIVE" : "GATED";
     const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";

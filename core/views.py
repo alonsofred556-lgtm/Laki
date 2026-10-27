@@ -22,7 +22,7 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 
 from .layerzero import route_summary
-from .assets import asset_decimals, native_asset, recipient_for, supported_asset
+from .assets import asset_decimals, native_asset, recipient_for, supported_asset, token_config, token_registry
 from .audit import record_event
 from .funding import InsufficientBalance, reserve_withdrawal
 from .models import AuditEvent, ArbitrageOpportunity, BotControl, BotWallet, BotWalletProvisionRequest, BotWalletTransfer, ChainCursor, DepositObservation, Execution, FeeEvent, FundingIntent, ProfitSettlement, ReconciliationRun, WalletChallenge, WalletIdentity, WithdrawalRequest
@@ -629,11 +629,38 @@ def funding_intent(request):
         expires = timezone.now() + timedelta(minutes=5)
         intent = FundingIntent.objects.create(wallet_identity=identity, bot_wallet=bot_wallet, asset=asset, chain=chain, amount_base_units=amount_base, destination=destination, status="awaiting-wallet-approval", expires_at=expires)
         record_event("funding.intent.created", actor_type="wallet", actor_id=identity.id, subject_type="funding_intent", subject_id=intent.id, request_id=request_id(request), metadata={"asset": asset, "chain": chain, "amountBaseUnits": amount_base})
-        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": chain, "amount": amount, "amountBaseUnits": amount_base, "destination": destination, "botWalletId": str(bot_wallet.id) if bot_wallet else None, "expiresAt": expires.isoformat()}, 201, request)
+        configured_token = token_config(asset, chain) or {}
+        return api_response({"intentId": str(intent.id), "state": intent.status, "asset": asset, "chain": chain, "amount": amount, "amountBaseUnits": amount_base, "decimals": decimals, "tokenAddress": configured_token.get("address") if asset != native_asset(chain) else None, "tokenProgram": configured_token.get("programId") if asset != native_asset(chain) else None, "destination": destination, "botWalletId": str(bot_wallet.id) if bot_wallet else None, "expiresAt": expires.isoformat()}, 201, request)
     except PermissionError as exc:
         return error(str(exc), 401, request)
     except (ValueError, json.JSONDecodeError) as exc:
         return error(str(exc), 400, request)
+
+
+def funding_assets(request):
+    """Return only server-configured assets that the verifier can validate."""
+    try:
+        identity = require_session(request)
+        chain = str(request.GET.get("chain") or identity.chain)
+        if chain not in CHAINS:
+            return error("unsupported funding chain", 400, request)
+        if not chain_accessible(identity, chain):
+            return error("authenticated wallet cannot fund this chain", 403, request)
+        assets = []
+        native = native_asset(chain)
+        if native:
+            assets.append({"asset": native, "decimals": asset_decimals(native, chain), "native": True, "tokenAddress": None, "tokenProgram": None})
+        for asset in token_registry().keys():
+            configured = token_config(asset, chain)
+            if not configured or not configured.get("address"):
+                continue
+            decimals = asset_decimals(asset, chain)
+            if decimals is None:
+                continue
+            assets.append({"asset": str(asset).upper(), "decimals": decimals, "native": False, "tokenAddress": configured["address"], "tokenProgram": configured.get("programId")})
+        return api_response({"chain": chain, "assets": assets}, 200, request)
+    except PermissionError as exc:
+        return error(str(exc), 401, request)
 
 
 @csrf_exempt

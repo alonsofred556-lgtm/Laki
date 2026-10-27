@@ -25,6 +25,7 @@ urlpatterns = [
     path("market/trade-quote", lambda request: views.quote_proxy(request, "trade")),
     path("market/bridge-quote", lambda request: views.quote_proxy(request, "bridge")),
     path("funding/intent", views.funding_intent),
+    path("funding/assets", views.funding_assets),
     path("funding/claim", views.funding_claim),
     path("funding/status/<uuid:intent_id>", views.funding_status),
     path("funding/unclaimed", views.unclaimed_deposits),
