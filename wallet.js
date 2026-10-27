@@ -136,6 +136,45 @@
     return verified.wallet;
   }
 
+  async function authenticateLocalWallet(descriptor) {
+    const wallet = await authenticateWallet(
+      descriptor.chain,
+      descriptor.address,
+      (messageText) => window.ConiLocalWallet.signMessage(descriptor.chain, descriptor.secret, messageText),
+    );
+    preferredBotMode = "external-bot";
+    localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+    if (descriptor.chain === "solana") {
+      state.solana = {
+        provider: null,
+        address: descriptor.address,
+        chain: "solana",
+        balance: "Local wallet",
+        providerName: "Coni local wallet",
+        authenticated: true,
+        local: true,
+      };
+    } else {
+      const chainId = config.wallets.evmChains[descriptor.chain];
+      state.evm = {
+        provider: null,
+        address: descriptor.address,
+        chain: descriptor.chain,
+        chainId,
+        chainName: chainNames[chainId] || descriptor.chain,
+        balance: "Local wallet",
+        providerName: "Coni local wallet",
+        authenticated: true,
+        local: true,
+      };
+    }
+    saveConnections();
+    renderConnections();
+    loadFundingAssets(descriptor.chain);
+    loadBotWallet();
+    return wallet;
+  }
+
   async function loadTokenLogo() {
     try {
       const response = await fetch(`${config.tokenMetadataUrl}?launch=${encodeURIComponent(config.token.slug)}`, { headers: { Accept: "application/json" } });
@@ -327,6 +366,8 @@
     const requestedChain = botFundingMode ? activeBotWallet?.chain : (state.solana?.authenticated ? "solana" : state.evm?.chain);
     const fundingAddress = requestedChain === "solana" ? state.solana?.address : state.evm?.address;
     if (!requestedChain || !fundingAddress || (requestedChain === "solana" ? state.solana?.restored : state.evm?.restored)) { $("#funding-status").textContent = "Connect the wallet for the selected bot network before preparing funding."; return; }
+    const sourceWallet = requestedChain === "solana" ? state.solana : state.evm;
+    if (sourceWallet?.local && !sourceWallet.provider) { $("#funding-status").textContent = "This local wallet is authenticated, but transaction approval requires reconnecting a wallet provider for the selected network."; return; }
     if (!/^\d+(\.\d{1,18})?$/.test(amount) || Number(amount) <= 0) { $("#funding-status").textContent = "Enter a positive amount with no more than 18 decimal places."; return; }
     $("#funding-status").textContent = "Asking the secure backend for a whitelisted funding intent…";
     try {
@@ -574,7 +615,7 @@
     loadBotWallet();
   }
 
-  async function encryptLocalSecret(secret, password, chain) {
+  async function encryptLocalSecret(secret, password, chain, address = "") {
     const encoder = new TextEncoder();
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -582,13 +623,13 @@
     const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
     const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(secret));
     const encode = (bytes) => btoa(String.fromCharCode(...bytes));
-    return { version: 1, chain, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
+    return { version: 1, chain, address, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
   }
 
   function readLocalVault() {
     try {
       const vault = JSON.parse(localStorage.getItem("coni.internal.vault.v1") || "null");
-      if (!vault || vault.version !== 1 || !["evm", "solana"].includes(vault.chain) || vault.algorithm !== "PBKDF2-AES-GCM") return null;
+      if (!vault || vault.version !== 1 || !["ethereum", "base", "robinhood", "bsc", "evm", "solana"].includes(vault.chain) || vault.algorithm !== "PBKDF2-AES-GCM") return null;
       if (![vault.salt, vault.iv, vault.ciphertext].every((value) => typeof value === "string" && value.length > 0)) return null;
       return vault;
     } catch {
@@ -617,9 +658,9 @@
       status.textContent = "No encrypted local backup stored in this browser.";
       return;
     }
-    $("#existing-wallet-chain").value = vault.chain;
+    $("#existing-wallet-chain").value = vault.chain === "evm" ? "base" : vault.chain;
     const created = vault.createdAt ? new Date(vault.createdAt).toLocaleString() : "unknown time";
-    status.textContent = `Encrypted ${vault.chain === "solana" ? "Solana" : "EVM"} backup present · created ${created}`;
+    status.textContent = `Encrypted ${vault.chain === "solana" ? "Solana" : vault.chain.toUpperCase()} backup present${vault.address ? ` · ${short(vault.address)}` : ""} · created ${created}`;
   }
 
   async function verifyLocalVault() {
@@ -665,39 +706,67 @@
     $("#local-vault-status").textContent = "Encrypted local backup deleted from this browser.";
   }
 
-  function validLocalSecret(chain, secret) {
-    if (chain === "evm") return /^0x[a-fA-F0-9]{64}$/.test(secret);
-    if (/^[1-9A-HJ-NP-Za-km-z]{64,128}$/.test(secret)) return true;
-    try {
-      const parsed = JSON.parse(secret);
-      return Array.isArray(parsed) && parsed.length === 64 && parsed.every((item) => Number.isInteger(item) && item >= 0 && item <= 255);
-    } catch { return false; }
-  }
-
   async function importLocalWallet() {
     const chain = $("#existing-wallet-chain").value;
     const privateKey = $("#existing-private-key").value.trim();
     const password = $("#existing-wallet-password").value;
-    if (!validLocalSecret(chain, privateKey) || password.length < 12) {
+    let descriptor = null;
+    try {
+      descriptor = window.ConiLocalWallet?.describe(chain, privateKey);
+    } catch {
+      descriptor = null;
+    }
+    if (!descriptor || password.length < 12) {
       $("#vault-action-status").textContent = chain === "solana" ? "Enter a valid Solana base58 secret or 64-byte JSON array and a password of at least 12 characters. The secret remains in this browser and is never posted." : "Enter a valid EVM private key and a password of at least 12 characters. The key remains in this browser and is never posted.";
       return;
     }
     if (readLocalVault() && !window.confirm("Replace the existing encrypted local backup? The old backup will be overwritten.")) return;
-    const vault = await encryptLocalSecret(privateKey, password, chain);
+    let secret = descriptor.secret;
+    const vault = await encryptLocalSecret(secret, password, chain, descriptor.address);
     localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
+    try {
+      await authenticateLocalWallet(descriptor);
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(descriptor.address)}. Connect a wallet provider before approving transactions.`;
+    } catch {
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} local backup created. Connect this address through a wallet provider to authenticate and fund it.`;
+    } finally {
+      secret = "";
+      descriptor.secret = "";
+    }
     $("#existing-private-key").value = "";
     $("#existing-wallet-password").value = "";
-    $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} local backup created. It is not a live bot signer until an audited wallet SDK and signer policy are connected.`;
     renderLocalVaultTools();
   }
 
-  async function createInternalWallet() {
+  async function createLocalWallet() {
+    const chain = $("#new-wallet-chain").value;
     const password = $("#new-wallet-password").value;
     const confirm = $("#new-wallet-password-confirm").value;
     if (password.length < 12 || password !== confirm) {
       $("#vault-action-status").textContent = "Use a password of at least 12 characters and confirm it exactly.";
       return;
     }
+    if (!window.ConiLocalWallet) throw new Error("Local wallet module is unavailable");
+    if (readLocalVault() && !window.confirm("Replace the existing encrypted local backup? The old backup will be overwritten.")) return;
+    const generated = window.ConiLocalWallet.create(chain);
+    let secret = generated.secret;
+    const vault = await encryptLocalSecret(secret, password, chain, generated.address);
+    localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
+    try {
+      await authenticateLocalWallet(generated);
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(generated.address)}. Connect a wallet provider before approving transactions.`;
+    } catch {
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet created at ${short(generated.address)}. Connect this address through a wallet provider to authenticate and fund it.`;
+    } finally {
+      secret = "";
+      generated.secret = "";
+    }
+    $("#new-wallet-password").value = "";
+    $("#new-wallet-password-confirm").value = "";
+    renderLocalVaultTools();
+  }
+
+  async function requestInternalWallet() {
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/provision`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "internal-bot" }) });
       const result = await response.json();
@@ -759,7 +828,8 @@
   $("#verify-local-vault")?.addEventListener("click", () => verifyLocalVault().catch(() => { $("#local-vault-status").textContent = "Local backup verification failed; no secret was uploaded."; }));
   $("#export-local-vault")?.addEventListener("click", exportLocalVault);
   $("#delete-local-vault")?.addEventListener("click", deleteLocalVault);
-  $("#create-internal-wallet").addEventListener("click", createInternalWallet);
+  $("#create-local-wallet").addEventListener("click", () => createLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local wallet generation failed; no key was uploaded."; }));
+  $("#request-internal-wallet").addEventListener("click", requestInternalWallet);
   document.addEventListener("click", (event) => {
     const claim = event.target.closest("[data-claim-observation]");
     if (claim) {

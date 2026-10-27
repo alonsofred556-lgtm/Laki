@@ -42,7 +42,7 @@ Create a Railway service from this repository and a managed PostgreSQL service. 
 - A separate signer policy service skeleton that requires an audited HSM/MPC adapter and rejects arbitrary calldata.
 - Coni-branded logo and wordmark assets reused from the supplied theme.
 - Responsive website shell and compact extension popup.
-- No seed phrases or private keys are exposed. Deposits, withdrawals, bridge transactions, and automatic trading remain disabled until the audited signer/treasury boundary is supplied.
+- No private key is sent to Coni. Imported or newly generated non-custodial wallet secrets are encrypted locally in the browser; managed bot-wallet keys remain inside the audited signer/treasury boundary. Automatic bot execution remains gated until that boundary is supplied.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) and [backend/README.md](backend/README.md) before adding wallet signing or execution.
 # ClickOt

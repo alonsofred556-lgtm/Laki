@@ -13,6 +13,7 @@
     "db:migrate": "python manage.py migrate",
     "check": "python manage.py check --deploy",
     "build:solana": "esbuild solana-funding.entry.js --bundle --format=iife --global-name=ConiSolanaBundle --outfile=assets/solana-funding.js --minify",
+    "build:wallet": "esbuild local-wallet.entry.js --bundle --format=iife --global-name=ConiLocalWalletBundle --outfile=assets/local-wallet.js --minify",
     "legacy:node": "node backend/server.mjs"
   },
   "dependencies": {
