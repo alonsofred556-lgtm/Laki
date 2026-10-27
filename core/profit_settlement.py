@@ -13,6 +13,7 @@ from .models import Execution, LedgerEntry, ProfitSettlement, ProfitSettlementEv
 
 SETTLEMENT_EVENTS = {"submitted", "confirmed", "failed"}
 SETTLEMENT_PROOF_EVENTS = {"submitted", "confirmed"}
+EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 _SETTLEMENT_TRANSITIONS = {
     "pending-approval": {"submitted": "submitted", "failed": "failed"},
     "submitted": {"confirmed": "confirmed", "failed": "failed"},
@@ -31,6 +32,16 @@ def next_settlement_state(current, event):
 def settlement_event_requires_tx_hash(event):
     """Return whether a signer callback must include an on-chain tx proof."""
     return event in SETTLEMENT_PROOF_EVENTS
+
+
+def settlement_identity_can_receive(identity_chain, settlement_chain):
+    """EVM addresses can receive on the configured Robinhood EVM chain.
+
+    A Solana identity cannot be used as an EVM payout recipient. For EVM
+    identities, the authenticated address is chain-independent; the signer
+    still validates the configured Robinhood token transfer before settlement.
+    """
+    return settlement_chain == "robinhood" and identity_chain in EVM_CHAINS
 
 
 def _decimal(value):
@@ -56,8 +67,8 @@ def prepare_usdg_settlement(*, execution_id, user_identity_id, realized_profit_u
         raise ValueError("USDG settlement is disabled")
     if not settings.CONI_PROFIT_SETTLEMENT_TOKEN_ADDRESS or settings.CONI_PROFIT_SETTLEMENT_DECIMALS is None:
         raise ValueError("verified USDG token address and decimals are required")
-    if settings.CONI_PROFIT_SETTLEMENT_CHAIN != "robinhood" or identity.chain != "robinhood":
-        raise ValueError("USDG settlement requires the user's Robinhood Chain wallet identity")
+    if not settlement_identity_can_receive(identity.chain, settings.CONI_PROFIT_SETTLEMENT_CHAIN):
+        raise ValueError("USDG settlement requires an authenticated EVM wallet identity")
     if realized <= 0 or price <= 0 or not recipient or recipient.lower() != identity.address.lower():
         raise ValueError("invalid realized profit, USDG price, or recipient")
     amount = (realized / price * (Decimal("10") ** settings.CONI_PROFIT_SETTLEMENT_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)

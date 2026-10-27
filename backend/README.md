@@ -23,7 +23,7 @@ The canonical production backend is Django in `coni_backend/` and `core/`. `serv
 - `/api/internal/signer/execution-intent` is the private signer pull endpoint. It returns one exact hash-bound Pangea quote artifact and its legs, marks the execution `awaiting-signer`, and never returns private keys or accepts arbitrary calldata from the caller.
 - Private signer callbacks require a short-lived HMAC over the exact request body in production; a static secret header is available only for local development when `CONI_SIGNER_CALLBACK_REQUIRE_HMAC=false`.
 - `/api/bot/status`, `/api/bot/scan`, `/api/bot/profit`, and `/api/bot/pause` expose guarded operations. Operations routes require `x-coni-ops-token` where applicable.
-- `/api/profit/prepare-settlement` creates a pending USDG payout instruction only for a settled execution and the user's Robinhood Chain identity. It never signs or broadcasts.
+- `/api/profit/prepare-settlement` creates a pending USDG payout instruction only for a settled execution and an authenticated EVM wallet identity; the same EVM address receives on Robinhood Chain. Solana identities are rejected. It never signs or broadcasts.
 - `/api/fees/accrue` records fee liabilities in the ledger. It never sends a fee on-chain; the signer/treasury service must later sweep accrued balances.
 - `/api/execution/plan` creates a persisted quoted execution only after authentication. It returns a conflict while execution is gated and never accepts arbitrary calldata.
 - `python manage.py plan_arbitrage_executions` is an optional private worker. It re-quotes approved opportunities for each active and funded user bot wallet, then creates signer-gated execution plans; it never signs or broadcasts.
