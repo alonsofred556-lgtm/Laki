@@ -499,8 +499,16 @@
     }
     const withdrawalSelect = $("#bot-withdraw-asset");
     if (withdrawalSelect) {
-      withdrawalSelect.innerHTML = `<option value="${native}">${native}</option>`;
-      withdrawalSelect.value = native;
+      const current = withdrawalSelect.value;
+      withdrawalSelect.replaceChildren();
+      if (!fundingAssets.size) fundingAssets.set(native, { asset: native, decimals: native === "SOL" ? 9 : 18, native: true });
+      fundingAssets.forEach((item) => {
+        const option = document.createElement("option");
+        option.value = item.asset;
+        option.textContent = item.native ? item.asset : `${item.asset} token`;
+        withdrawalSelect.appendChild(option);
+      });
+      withdrawalSelect.value = fundingAssets.has(current) ? current : (fundingAssets.has(native) ? native : withdrawalSelect.options[0]?.value || "");
     }
   }
 
@@ -795,7 +803,9 @@
     if (!activeBotWallet || activeBotWallet.status !== "active") throw new Error("bot wallet is not active");
     const asset = $("#bot-withdraw-asset").value;
     const amount = $("#bot-withdraw-amount").value.trim();
-    const decimals = asset === "SOL" ? 9 : 18;
+    const assetMetadata = fundingAssets.get(asset);
+    const decimals = assetMetadata?.decimals;
+    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 36) throw new Error("Select a verified asset before requesting withdrawal");
     if (!/^\d+(\.\d+)?$/.test(amount)) throw new Error("enter a valid withdrawal amount");
     const amountBaseUnits = toBaseUnits(amount, decimals).toString();
     const destination = activeBotWallet.chain === "solana" ? state.solana?.address : state.evm?.address;
