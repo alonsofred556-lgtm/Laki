@@ -1,4 +1,6 @@
 import os
+from types import SimpleNamespace
+from unittest.mock import patch
 from decimal import Decimal
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "coni_backend.settings")
@@ -8,7 +10,7 @@ from django.test import SimpleTestCase, override_settings
 
 django.setup()
 
-from .arbitrage import _amount_from_quote, candidate_routes, evaluate_candidate
+from .arbitrage import _amount_from_quote, candidate_routes, evaluate_candidate, quote_discovery_opportunity
 from .pangea_bridge import next_bridge_state
 
 
@@ -86,3 +88,29 @@ class ArbitrageDecisionTests(SimpleTestCase):
         pools += [{"chain": "bsc", "token": f"0xc{i}", "priceUsd": "2"} for i in range(260)]
         routes = candidate_routes({"launches": [{"slug": "many", "pools": pools}]})
         self.assertGreater(len(routes), 500)
+
+    @patch("core.arbitrage._quote_route")
+    def test_discovery_quote_reloads_the_exact_route_tokens(self, quote_route):
+        opportunity = SimpleNamespace(
+            slug="demo",
+            buy_chain="base",
+            sell_chain="bsc",
+            buy_token="0xbuy",
+            sell_token="0xsell",
+        )
+        data = {
+            "rates": {"ETH": "3000", "BNB": "600"},
+            "launches": [{"slug": "demo", "symbol": "D", "pools": [self.buy, self.sell]}],
+        }
+        quote_route.return_value = (
+            {
+                "buy": {"details": {"amountOut": "10000000000"}},
+                "sell": {"details": {"amountOut": "5000000000000000"}},
+            },
+            {"routes": [{"id": "canonical", "amountOut": "9980000000", "tokenFee": "20000000", "nativeFee": "1000000", "seconds": 12}]},
+        )
+        row = quote_discovery_opportunity(opportunity, data=data)
+        self.assertEqual(row["quoteState"], "fresh")
+        self.assertTrue(row["quoteHash"])
+        self.assertEqual(row["quoteArtifact"]["trade"]["buy"]["details"]["amountOut"], "10000000000")
+        quote_route.assert_called_once()

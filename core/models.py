@@ -389,6 +389,10 @@ class ArbitrageOpportunity(models.Model):
     state = models.CharField(max_length=32, default="detected")
     quote_hash = models.CharField(max_length=128, null=True, blank=True)
     decision = models.JSONField(default=dict)
+    quote_attempts = models.PositiveIntegerField(default=0)
+    quote_available_at = models.DateTimeField(null=True, blank=True)
+    quote_lease_until = models.DateTimeField(null=True, blank=True)
+    quote_last_error = models.CharField(max_length=160, blank=True)
     detected_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(null=True, blank=True)
 
@@ -397,6 +401,7 @@ class ArbitrageOpportunity(models.Model):
         indexes = [
             models.Index(fields=["slug", "detected_at"], name="arb_slug_detected"),
             models.Index(fields=["state", "detected_at"], name="arb_state_detected"),
+            models.Index(fields=["quote_hash", "quote_available_at"], name="arb_quote_queue"),
         ]
 
 

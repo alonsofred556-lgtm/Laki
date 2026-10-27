@@ -312,6 +312,48 @@ def fresh_user_quotes(opportunity, *, buy_wallet, sell_wallet):
     return row
 
 
+def quote_discovery_opportunity(opportunity, *, data=None):
+    """Refresh one queued discovery route with a current Pangea quote.
+
+    Discovery quotes use the configured scanner wallets and are never treated
+    as user execution authorization. The execution planner must still call
+    ``fresh_user_quotes`` for the user's active bot-wallet addresses before a
+    signer handoff.
+    """
+    data = data or request_json("/pools")
+    launch = next((item for item in data.get("launches", []) if item.get("slug") == opportunity.slug), None)
+    if not launch:
+        raise PangeaError("Pangea launch is no longer available")
+    pools = [
+        item for item in launch.get("pools", [])
+        if isinstance(item, dict)
+        and item.get("chain")
+        and item.get("token")
+        and _pool_price(item) > ZERO
+    ]
+
+    def matches(pool, chain, token):
+        return pool.get("chain") == chain and (not token or str(pool.get("token")).lower() == str(token).lower())
+
+    buy_pool = next((item for item in pools if matches(item, opportunity.buy_chain, opportunity.buy_token)), None)
+    sell_pool = next((item for item in pools if matches(item, opportunity.sell_chain, opportunity.sell_token)), None)
+    if not buy_pool or not sell_pool:
+        raise PangeaError("Pangea source or destination pool is no longer available")
+    trade_quotes, bridge_quote = _quote_route(launch, buy_pool, sell_pool, data.get("rates", {}))
+    row = evaluate_candidate(
+        launch=launch,
+        buy_pool=buy_pool,
+        sell_pool=sell_pool,
+        rates=data.get("rates", {}),
+        trade_quotes=trade_quotes,
+        bridge_quote=bridge_quote,
+        require_quotes=True,
+    )
+    row["quoteHash"] = _hash({"trade": trade_quotes, "bridge": bridge_quote}) if trade_quotes or bridge_quote else None
+    row["quoteArtifact"] = {"trade": trade_quotes, "bridge": bridge_quote} if trade_quotes or bridge_quote else None
+    return row
+
+
 def candidate_routes(data, *, max_candidates=None):
     """Enumerate every profitable cross-chain pool direction in the feed."""
     candidates = []
