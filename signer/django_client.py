@@ -36,6 +36,35 @@ class ProvisionRequest:
     lease_until: str | None
 
 
+@dataclass(frozen=True)
+class BotTransferIntent:
+    transfer_id: str
+    bot_wallet_id: str
+    owner_id: str
+    chain: str
+    asset: str
+    direction: str
+    amount_base_units: str
+    destination: str
+    signer_key_ref: str
+    attempt: int
+    lease_until: str | None
+
+
+@dataclass(frozen=True)
+class WithdrawalIntent:
+    withdrawal_id: str
+    owner_id: str
+    chain: str
+    asset: str
+    amount_base_units: str
+    destination: str
+    nonce: str
+    signer_key_ref: str
+    attempt: int
+    lease_until: str | None
+
+
 class DjangoSignerClient:
     """HMAC-authenticated client for the private Django signer boundary."""
 
@@ -43,6 +72,8 @@ class DjangoSignerClient:
     _evm_address = re.compile(r"^0x[a-fA-F0-9]{40}$")
     _solana_address = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
     _hash = re.compile(r"^(0x)?[a-fA-F0-9]{64}$")
+    _solana_tx = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{43,88}$")
+    _idempotency = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
     _key_ref = re.compile(r"^[A-Za-z0-9._:/-]{8,128}$")
     _uuid = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 
@@ -196,3 +227,220 @@ class DjangoSignerClient:
             "attestationHash": attestation_hash,
         }
         return self._signed_request("POST", "/api/internal/signer/bot-wallet-attest", payload=payload)
+
+    def pull_bot_transfer_intents(self, *, limit: int = 20) -> list[BotTransferIntent]:
+        """Lease withdrawal intents for the custody adapter."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("bot transfer intent limit must be between 1 and 100")
+        response = self._signed_request(
+            "GET",
+            "/api/internal/signer/bot-transfer-intents",
+            query={"limit": str(limit)},
+        )
+        rows = response.get("transfers")
+        if not isinstance(rows, list):
+            raise DjangoSignerClientError("transfer response is missing transfers")
+        parsed: list[BotTransferIntent] = []
+        for row in rows:
+            allowed = {
+                "transferId", "botWalletId", "ownerId", "chain", "asset", "direction",
+                "amountBaseUnits", "destination", "signerKeyRef", "attempt", "leaseUntil",
+            }
+            if not isinstance(row, dict) or set(row) - allowed:
+                raise DjangoSignerClientError("transfer response contains unexpected fields")
+            chain = str(row.get("chain", ""))
+            if (
+                chain not in self._chains
+                or row.get("direction") != "withdrawal"
+                or not self._uuid.fullmatch(str(row.get("transferId", "")))
+                or not self._uuid.fullmatch(str(row.get("botWalletId", "")))
+                or not self._uuid.fullmatch(str(row.get("ownerId", "")))
+                or not re.fullmatch(r"[A-Za-z0-9]{1,16}", str(row.get("asset", "")))
+                or not re.fullmatch(r"\d{1,78}", str(row.get("amountBaseUnits", "")))
+                or not self._address_valid(chain, row.get("destination"))
+                or not self._key_ref.fullmatch(str(row.get("signerKeyRef", "")))
+            ):
+                raise DjangoSignerClientError("transfer response contains invalid intent fields")
+            attempt = row.get("attempt")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise DjangoSignerClientError("transfer response contains an invalid attempt")
+            parsed.append(BotTransferIntent(
+                transfer_id=str(row["transferId"]),
+                bot_wallet_id=str(row["botWalletId"]),
+                owner_id=str(row["ownerId"]),
+                chain=chain,
+                asset=str(row["asset"]).upper(),
+                direction="withdrawal",
+                amount_base_units=str(row["amountBaseUnits"]),
+                destination=str(row["destination"]),
+                signer_key_ref=str(row["signerKeyRef"]),
+                attempt=attempt,
+                lease_until=str(row["leaseUntil"]) if row.get("leaseUntil") else None,
+            ))
+        return parsed
+
+    def record_bot_transfer_event(
+        self,
+        *,
+        transfer_id: str,
+        chain: str,
+        event: str,
+        idempotency_key: str,
+        tx_hash: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Post a proof-bound bot withdrawal lifecycle event."""
+        if not self._uuid.fullmatch(str(transfer_id)) or chain not in self._chains:
+            raise ValueError("invalid bot transfer identifier or chain")
+        if event not in {"submitted", "confirmed", "failed"}:
+            raise ValueError("invalid bot transfer event")
+        if not self._idempotency.fullmatch(str(idempotency_key)):
+            raise ValueError("invalid bot transfer idempotency key")
+        if event != "failed":
+            pattern = self._solana_tx if chain == "solana" else self._hash
+            if not pattern.fullmatch(tx_hash):
+                raise ValueError("invalid bot transfer transaction proof")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("bot transfer metadata must be an object")
+        return self._signed_request(
+            "POST",
+            "/api/internal/signer/bot-transfer-event",
+            payload={
+                "transferId": str(transfer_id),
+                "event": event,
+                "idempotencyKey": str(idempotency_key),
+                "txHash": tx_hash,
+                "metadata": metadata or {},
+            },
+        )
+
+    def pull_withdrawal_intents(self, *, limit: int = 20) -> list[WithdrawalIntent]:
+        """Lease manually approved normal-custody withdrawal intents."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("withdrawal intent limit must be between 1 and 100")
+        response = self._signed_request(
+            "GET",
+            "/api/internal/signer/withdrawal-intents",
+            query={"limit": str(limit)},
+        )
+        rows = response.get("withdrawals")
+        if not isinstance(rows, list):
+            raise DjangoSignerClientError("withdrawal response is missing withdrawals")
+        parsed: list[WithdrawalIntent] = []
+        for row in rows:
+            allowed = {
+                "withdrawalId", "ownerId", "chain", "asset", "amountBaseUnits",
+                "destination", "nonce", "signerKeyRef", "attempt", "leaseUntil",
+            }
+            if not isinstance(row, dict) or set(row) - allowed:
+                raise DjangoSignerClientError("withdrawal response contains unexpected fields")
+            chain = str(row.get("chain", ""))
+            if (
+                chain not in self._chains
+                or not self._uuid.fullmatch(str(row.get("withdrawalId", "")))
+                or not self._uuid.fullmatch(str(row.get("ownerId", "")))
+                or not re.fullmatch(r"[A-Za-z0-9]{1,16}", str(row.get("asset", "")))
+                or not re.fullmatch(r"\d{1,78}", str(row.get("amountBaseUnits", "")))
+                or not self._address_valid(chain, row.get("destination"))
+                or not self._key_ref.fullmatch(str(row.get("signerKeyRef", "")))
+                or not str(row.get("nonce", ""))
+            ):
+                raise DjangoSignerClientError("withdrawal response contains invalid intent fields")
+            attempt = row.get("attempt")
+            if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+                raise DjangoSignerClientError("withdrawal response contains an invalid attempt")
+            parsed.append(WithdrawalIntent(
+                withdrawal_id=str(row["withdrawalId"]),
+                owner_id=str(row["ownerId"]),
+                chain=chain,
+                asset=str(row["asset"]).upper(),
+                amount_base_units=str(row["amountBaseUnits"]),
+                destination=str(row["destination"]),
+                nonce=str(row["nonce"]),
+                signer_key_ref=str(row["signerKeyRef"]),
+                attempt=attempt,
+                lease_until=str(row["leaseUntil"]) if row.get("leaseUntil") else None,
+            ))
+        return parsed
+
+    def record_withdrawal_event(
+        self,
+        *,
+        withdrawal_id: str,
+        chain: str,
+        event: str,
+        idempotency_key: str,
+        tx_hash: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Post proof-bound evidence for a normal custody withdrawal."""
+        if not self._uuid.fullmatch(str(withdrawal_id)) or chain not in self._chains:
+            raise ValueError("invalid withdrawal identifier or chain")
+        if event not in {"submitted", "confirmed", "failed"}:
+            raise ValueError("invalid withdrawal event")
+        if not self._idempotency.fullmatch(str(idempotency_key)):
+            raise ValueError("invalid withdrawal idempotency key")
+        if event != "failed":
+            pattern = self._solana_tx if chain == "solana" else self._hash
+            if not pattern.fullmatch(tx_hash):
+                raise ValueError("invalid withdrawal transaction proof")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("withdrawal metadata must be an object")
+        return self._signed_request(
+            "POST",
+            "/api/internal/signer/withdrawal-event",
+            payload={
+                "withdrawalId": str(withdrawal_id),
+                "event": event,
+                "idempotencyKey": str(idempotency_key),
+                "txHash": tx_hash,
+                "metadata": metadata or {},
+            },
+        )
+
+    def record_profit_compound_event(
+        self,
+        *,
+        allocation_id: str,
+        event: str,
+        idempotency_key: str,
+        tx_hash: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Post a proof-bound retained-profit lifecycle event to Django."""
+        if not self._uuid.fullmatch(str(allocation_id)):
+            raise ValueError("invalid profit allocation identifier")
+        if event not in {"submitted", "confirmed", "failed"}:
+            raise ValueError("invalid compound event")
+        if not self._idempotency.fullmatch(str(idempotency_key)):
+            raise ValueError("invalid compound idempotency key")
+        if tx_hash and not self._hash.fullmatch(tx_hash):
+            raise ValueError("invalid compound transaction hash")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("compound metadata must be an object")
+        return self._signed_request(
+            "POST",
+            "/api/internal/signer/profit-compound-event",
+            payload={
+                "allocationId": str(allocation_id),
+                "event": event,
+                "idempotencyKey": str(idempotency_key),
+                "txHash": tx_hash,
+                "metadata": metadata or {},
+            },
+        )
+
+    def pull_profit_compound_intent(self, *, allocation_id: str, idempotency_key: str) -> dict[str, Any]:
+        """Pull one bounded retained-profit allocation for custody processing."""
+        if not self._uuid.fullmatch(str(allocation_id)):
+            raise ValueError("invalid profit allocation identifier")
+        if not self._idempotency.fullmatch(str(idempotency_key)):
+            raise ValueError("invalid compound idempotency key")
+        response = self._signed_request(
+            "POST",
+            "/api/internal/signer/profit-compound-intent",
+            payload={"allocationId": str(allocation_id), "idempotencyKey": str(idempotency_key)},
+        )
+        if not isinstance(response.get("intent"), dict):
+            raise DjangoSignerClientError("compound intent response is missing intent")
+        return response["intent"]

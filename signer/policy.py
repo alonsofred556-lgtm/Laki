@@ -1,10 +1,14 @@
 """Signer policy boundary. This module deliberately has no software-key fallback."""
 
 import hashlib
+import base64
 import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
 
 class PolicyError(ValueError):
@@ -40,7 +44,7 @@ class SignerPolicy:
     evm_address_re = re.compile(r"^0x[a-fA-F0-9]{40}$")
     solana_address_re = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
-    def __init__(self, *, mode="disabled", audit_approved=False, max_expiry_seconds=90, allowed_recipients=None, max_value_base_units=0, max_total_value_base_units=None, required_approvals=0):
+    def __init__(self, *, mode="disabled", audit_approved=False, max_expiry_seconds=90, allowed_recipients=None, max_value_base_units=0, max_total_value_base_units=None, required_approvals=0, approver_keys=None):
         self.mode = mode
         self.audit_approved = audit_approved
         self.max_expiry_seconds = max_expiry_seconds
@@ -65,6 +69,15 @@ class SignerPolicy:
         self.required_approvals = int(required_approvals or 0)
         if self.required_approvals < 0 or self.required_approvals > 4:
             raise ValueError("required approvals must be between 0 and 4")
+        self.approver_keys = {}
+        for approver_id, encoded_key in (approver_keys or {}).items():
+            if not re.fullmatch(r"[A-Za-z0-9._:-]{3,128}", str(approver_id)) or not isinstance(encoded_key, str):
+                raise ValueError("approver key configuration is invalid")
+            try:
+                key = VerifyKey(base64.b64decode(encoded_key, validate=True))
+            except (ValueError, TypeError) as exc:
+                raise ValueError("approver key configuration is invalid") from exc
+            self.approver_keys[str(approver_id)] = key
 
     def validate(self, payload):
         if not isinstance(payload, dict):
@@ -84,11 +97,12 @@ class SignerPolicy:
         if self.max_total_value_base_units <= 0:
             raise PolicyError("maximum total transaction value is not configured")
         approval_refs = payload.get("approvalRefs", [])
+        approvals = payload.get("approvals", [])
         if self.required_approvals:
-            if not isinstance(approval_refs, list) or len(approval_refs) != self.required_approvals:
-                raise PolicyError("required approval references are missing")
-            if any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{8,128}", item) for item in approval_refs) or len(set(approval_refs)) != len(approval_refs):
-                raise PolicyError("approval references are invalid")
+            if not self.approver_keys:
+                raise PolicyError("approver public keys are not configured")
+            if not isinstance(approvals, list) or len(approvals) != self.required_approvals:
+                raise PolicyError("required signed approvals are missing")
         elif approval_refs not in (None, []) and not isinstance(approval_refs, list):
             raise PolicyError("approval references must be a list")
         expires_at = int(payload.get("expiresAt", 0))
@@ -122,9 +136,32 @@ class SignerPolicy:
             normalized.append(SignStep(chain, recipient, str(step["valueBaseUnits"]), str(step["calldataHash"]), expires_at))
         if total_value > self.max_total_value_base_units:
             raise PolicyError("total transaction value exceeds signer policy")
-        canonical_approvals = [str(item) for item in approval_refs] if isinstance(approval_refs, list) else []
-        digest = hashlib.sha256(_canonical({"idempotencyKey": payload["idempotencyKey"], "quoteHash": quote_hash, "simulationHash": simulation_hash, "expiresAt": expires_at, "approvalRefs": canonical_approvals, "steps": [step.__dict__ for step in normalized]}).encode()).hexdigest()
-        return {"digest": digest, "quoteHash": quote_hash, "simulationHash": simulation_hash, "idempotencyKey": payload["idempotencyKey"], "approvalRefs": canonical_approvals, "steps": normalized}
+        approval_digest = hashlib.sha256(_canonical({"idempotencyKey": payload["idempotencyKey"], "quoteHash": quote_hash, "simulationHash": simulation_hash, "expiresAt": expires_at, "steps": [step.__dict__ for step in normalized]}).encode()).hexdigest()
+        canonical_approvals = []
+        if self.required_approvals:
+            for approval in approvals:
+                if not isinstance(approval, dict) or set(approval) != {"approverId", "intentDigest", "expiresAt", "signature"}:
+                    raise PolicyError("signed approval fields are invalid")
+                approver_id = str(approval["approverId"])
+                signature = approval["signature"]
+                if approver_id not in self.approver_keys or not self.hash_re.fullmatch(str(approval["intentDigest"])) or str(approval["intentDigest"]) != approval_digest or int(approval["expiresAt"]) != expires_at or not isinstance(signature, str):
+                    raise PolicyError("signed approval is not bound to this intent")
+                if int(approval["expiresAt"]) <= int(datetime.now(timezone.utc).timestamp()):
+                    raise PolicyError("signed approval has expired")
+                approval_message = _canonical({"approverId": approver_id, "intentDigest": approval_digest, "expiresAt": expires_at}).encode()
+                try:
+                    self.approver_keys[approver_id].verify(approval_message, base64.b64decode(signature, validate=True))
+                except (ValueError, TypeError, BadSignatureError) as exc:
+                    raise PolicyError("signed approval verification failed") from exc
+                canonical_approvals.append(approver_id)
+            if len(set(canonical_approvals)) != len(canonical_approvals):
+                raise PolicyError("signed approvals must come from distinct approvers")
+        elif isinstance(approval_refs, list):
+            if any(not isinstance(item, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{8,128}", item) for item in approval_refs) or len(set(approval_refs)) != len(approval_refs):
+                raise PolicyError("approval references are invalid")
+            canonical_approvals = [str(item) for item in approval_refs]
+        digest = hashlib.sha256(_canonical({"idempotencyKey": payload["idempotencyKey"], "quoteHash": quote_hash, "simulationHash": simulation_hash, "expiresAt": expires_at, "approvalDigest": approval_digest, "approvalRefs": canonical_approvals, "steps": [step.__dict__ for step in normalized]}).encode()).hexdigest()
+        return {"digest": digest, "approvalDigest": approval_digest, "quoteHash": quote_hash, "simulationHash": simulation_hash, "idempotencyKey": payload["idempotencyKey"], "approvalRefs": canonical_approvals, "steps": normalized}
 
     def sign(self, payload, adapter=None):
         intent = self.validate(payload)

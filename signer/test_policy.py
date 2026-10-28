@@ -1,7 +1,10 @@
 import time
 import unittest
+import base64
 
-from .policy import PolicyError, SignerPolicy
+from nacl.signing import SigningKey
+
+from .policy import PolicyError, SignerPolicy, _canonical
 
 
 def intent(**overrides):
@@ -104,17 +107,44 @@ class SignerPolicyTests(unittest.TestCase):
             }]))
 
     def test_configured_two_person_approval_is_required_and_digest_bound(self):
+        first_key = SigningKey.generate()
+        second_key = SigningKey.generate()
+        third_key = SigningKey.generate()
+        approver_keys = {
+            "operator-a": base64.b64encode(bytes(first_key.verify_key)).decode(),
+            "operator-b": base64.b64encode(bytes(second_key.verify_key)).decode(),
+            "operator-c": base64.b64encode(bytes(third_key.verify_key)).decode(),
+        }
         policy = SignerPolicy(
             mode="live",
             audit_approved=True,
             allowed_recipients={"base": "0x1111111111111111111111111111111111111111"},
             max_value_base_units=1000,
             required_approvals=2,
+            approver_keys=approver_keys,
         )
         with self.assertRaises(PolicyError):
             policy.validate(intent())
-        first = policy.validate(intent(approvalRefs=["operator-a", "operator-b"]))
-        second = policy.validate(intent(approvalRefs=["operator-a", "operator-c"]))
+        base_policy = SignerPolicy(
+            mode="live", audit_approved=True,
+            allowed_recipients={"base": "0x1111111111111111111111111111111111111111"},
+            max_value_base_units=1000,
+        )
+        base_payload = intent()
+        base = base_policy.validate(base_payload)
+        expires = base_payload["expiresAt"]
+
+        def approval(approver_id, key):
+            message = _canonical({"approverId": approver_id, "intentDigest": base["approvalDigest"], "expiresAt": expires}).encode()
+            return {
+                "approverId": approver_id,
+                "intentDigest": base["approvalDigest"],
+                "expiresAt": expires,
+                "signature": base64.b64encode(key.sign(message).signature).decode(),
+            }
+
+        first = policy.validate(intent(approvals=[approval("operator-a", first_key), approval("operator-b", second_key)]))
+        second = policy.validate(intent(approvals=[approval("operator-a", first_key), approval("operator-c", third_key)]))
         self.assertEqual(first["approvalRefs"], ["operator-a", "operator-b"])
         self.assertNotEqual(first["digest"], second["digest"])
 
