@@ -226,6 +226,11 @@
     return verified.wallet;
   }
 
+  function personalSignPayload(messageText) {
+    const bytes = new TextEncoder().encode(String(messageText));
+    return `0x${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}`;
+  }
+
   async function provisionLocalBotWallet() {
     const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/provision`, {
       method: "POST",
@@ -377,7 +382,7 @@
       const balance = await readEvmBalance(provider, address);
       const chain = Object.entries(config.wallets.evmChains).find(([, id]) => id === chainId)?.[0];
       if (!chain) throw new Error("Unsupported EVM chain");
-      await authenticateWallet(chain, address, (messageText) => provider.request({ method: "personal_sign", params: [messageText, address] }), "external-bot");
+      await authenticateWallet(chain, address, (messageText) => provider.request({ method: "personal_sign", params: [personalSignPayload(messageText), address] }), "external-bot");
       preferredBotMode = "external-bot";
       localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
       state.evm = { provider, address, chain, chainId, chainName: chainNames[chainId] || `Chain ${chainId}`, balance, providerName: providerLabel(provider), authenticated: true };
