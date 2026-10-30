@@ -409,10 +409,6 @@
   async function establishSolanaSession(provider, address) {
     if (!address || !provider.signMessage) throw new Error("This Solana wallet does not expose off-chain message signing");
     let balance = "Connected";
-    try {
-      const result = await localRpc("solana", "getBalance", [address, { commitment: "confirmed" }]);
-      balance = `${(Number(result?.value || 0) / 1e9).toFixed(5)} SOL`;
-    } catch { /* balance stays connected when the private relay is unavailable */ }
     await authenticateWallet("solana", address, async (messageText) => {
       const messageBytes = new TextEncoder().encode(messageText);
       // SafePal's Solana provider accepts the message bytes as its only
@@ -423,9 +419,13 @@
       const signed = provider === window.safepal
         ? await provider.signMessage(messageBytes)
         : await provider.signMessage(messageBytes, "utf8");
-      const bytes = signed.signature || signed;
+      const bytes = solanaSignatureBytes(signed);
       return btoa(String.fromCharCode(...bytes));
     }, "external-bot");
+    try {
+      const result = await localRpc("solana", "getBalance", [address, { commitment: "confirmed" }]);
+      balance = `${(Number(result?.value || 0) / 1e9).toFixed(5)} SOL`;
+    } catch { /* balance stays connected when the private relay is unavailable */ }
     preferredBotMode = "external-bot";
     localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
     state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
@@ -433,6 +433,35 @@
     renderConnections();
     loadFundingAssets("solana");
     loadBotWallet();
+  }
+
+  function solanaSignatureBytes(result) {
+    const value = result?.signature || result;
+    if (value instanceof Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (Array.isArray(value)) return Uint8Array.from(value);
+    if (typeof value !== "string") throw new Error("SafePal returned an unsupported Solana signature format");
+    // Some providers return base64; accept it before falling back to the
+    // base58 representation commonly used by Solana tooling.
+    if (/^[A-Za-z0-9+/]+={0,2}$/.test(value) && value.length % 4 === 0) {
+      try { return Uint8Array.from(atob(value), (char) => char.charCodeAt(0)); } catch { /* try base58 */ }
+    }
+    const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const digits = [0];
+    for (const char of value) {
+      const index = alphabet.indexOf(char);
+      if (index < 0) throw new Error("SafePal returned an invalid Solana signature");
+      let carry = index;
+      for (let i = 0; i < digits.length; i += 1) {
+        const next = digits[i] * 58 + carry;
+        digits[i] = next & 255;
+        carry = next >> 8;
+      }
+      while (carry) { digits.push(carry & 255); carry >>= 8; }
+    }
+    const leadingZeroes = [...value].findIndex((char) => char !== "1");
+    const zeros = leadingZeroes < 0 ? value.length : leadingZeroes;
+    return Uint8Array.from([...new Array(zeros).fill(0), ...digits.reverse()]);
   }
 
   async function logoutWalletIdentity(identity) {
