@@ -416,9 +416,9 @@
       // Uint8Array; the second encoding argument is not part of the Solana
       // signMessage contract and causes SafePal to produce an incompatible
       // result on some versions.
-      const signed = provider === window.safepal
-        ? await provider.signMessage(messageBytes)
-        : await provider.signMessage(messageBytes, "utf8");
+      // Phantom and SafePal both follow the Solana wallet-adapter contract:
+      // signMessage receives the UTF-8 bytes as its only argument.
+      const signed = await provider.signMessage(messageBytes);
       const bytes = solanaSignatureBytes(signed);
       return btoa(String.fromCharCode(...bytes));
     }, "external-bot");
