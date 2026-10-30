@@ -445,6 +445,12 @@
     if (Array.isArray(value)) return Uint8Array.from(value);
     if (typeof value !== "string") throw new Error("SafePal returned an unsupported Solana signature format");
     const encodedValue = value.startsWith("0x") ? value.slice(2) : value;
+    // Hex must be checked before base64: a 128-character hex signature also
+    // matches the base64 alphabet, but decoding it as base64 produces 96
+    // garbage bytes instead of the required 64-byte Ed25519 signature.
+    if (/^[a-fA-F0-9]{128}$/.test(encodedValue)) {
+      return Uint8Array.from(encodedValue.match(/.{2}/g), (pair) => Number.parseInt(pair, 16));
+    }
     // Some providers return base64; accept it before falling back to the
     // base58 representation commonly used by Solana tooling.
     if (/^[A-Za-z0-9+/]+={0,2}$/.test(encodedValue) && encodedValue.length % 4 === 0) {
