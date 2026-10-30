@@ -402,8 +402,25 @@ def verify_signature(challenge, signature):
             value = "0x" + value
         if not re.fullmatch(r"0x[a-fA-F0-9]{130}", value):
             return False
-        recovered = Account.recover_message(encode_defunct(text=challenge.message), signature=value)
-        return recovered.lower() == challenge.address.lower()
+        # EIP-1193 wallets are inconsistent about ``personal_sign``: most
+        # providers hex-decode the first parameter before signing, while a
+        # few injected providers sign the literal string they received. The
+        # frontend sends the hex form, but accepting both canonical forms here
+        # keeps authentication interoperable without weakening ownership
+        # verification: both candidates are derived solely from the stored
+        # server challenge and must recover the requested address.
+        messages = [challenge.message]
+        encoded = "0x" + challenge.message.encode("utf-8").hex()
+        if encoded != challenge.message:
+            messages.append(encoded)
+        for message in messages:
+            try:
+                recovered = Account.recover_message(encode_defunct(text=message), signature=value)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if recovered.lower() == challenge.address.lower():
+                return True
+        return False
     try:
         public_key = base58.b58decode(challenge.address)
         signed = base64.b64decode(signature, validate=True)
