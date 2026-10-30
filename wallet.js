@@ -535,6 +535,21 @@
     }
   }
 
+  async function connectUnified() {
+    const evmProvider = providerForEvm();
+    const evmName = providerLabel(evmProvider);
+    const matchingSolana = solanaProviderOptions().find((item) => providerLabel(item.provider, true) === evmName);
+    if (!evmProvider || !matchingSolana) {
+      throw new Error("Choose SafePal or OKX in both wallet selectors, then try again.");
+    }
+    const evmKey = evmProviderOptions().find((item) => item.provider === evmProvider)?.key;
+    localStorage.setItem(EVM_PROVIDER_KEY, evmKey || "");
+    localStorage.setItem(SOLANA_PROVIDER_KEY, matchingSolana.key);
+    await connectEvm();
+    await connectSolana();
+    message(`${evmName} connected across EVM and Solana.`, "success");
+  }
+
   function renderConnections() {
     const connections = [state.evm, state.solana].filter(Boolean);
     $("#connection-count").textContent = `${connections.length} connected`;
@@ -1319,6 +1334,7 @@
 
   $("#connect-evm").addEventListener("click", (event) => runBusy(event.currentTarget, connectEvm));
   $("#connect-solana").addEventListener("click", (event) => runBusy(event.currentTarget, connectSolana));
+  $("#connect-unified")?.addEventListener("click", (event) => runBusy(event.currentTarget, () => connectUnified().catch((error) => message(error?.message || "Unified wallet connection failed.", "error"))));
   $("#open-fast-wallet")?.addEventListener("click", () => { $("#vault-modal").hidden = false; document.body.style.overflow = "hidden"; });
   $("#connection-list")?.addEventListener("click", (event) => {
     const button = event.target.closest("[data-disconnect-wallet]");
