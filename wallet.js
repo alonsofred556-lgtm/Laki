@@ -416,11 +416,11 @@
       // Uint8Array; the second encoding argument is not part of the Solana
       // signMessage contract and causes SafePal to produce an incompatible
       // result on some versions.
-      // Phantom follows the wallet-adapter byte contract. SafePal supports
-      // both forms, but some extension versions return an empty result for a
-      // Uint8Array and require the documented string form instead.
-      const isSafePal = provider === window.safepal || provider === window.safepalwallet?.solana;
-      const signed = await provider.signMessage(isSafePal ? messageText : messageBytes);
+      // Phantom and SafePal's Solana provider both document signing the
+      // exact UTF-8 Uint8Array. Keep the message bytes identical to the
+      // backend verification input; string mode can sign a transformed
+      // representation in some SafePal extension versions.
+      const signed = await provider.signMessage(messageBytes);
       const bytes = solanaSignatureBytes(signed);
       if (!bytes.length) throw new Error("The wallet returned an empty Solana signature; approve the message and try again.");
       return btoa(String.fromCharCode(...bytes));
