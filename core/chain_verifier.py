@@ -2,7 +2,6 @@ import json
 import time
 from datetime import datetime, timedelta, timezone as datetime_timezone
 
-import requests
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
@@ -10,6 +9,7 @@ from django.utils import timezone
 from .funding import credit_confirmed_deposit
 from .assets import native_asset, token_config
 from .models import DepositObservation
+from .rpc import result as rpc_result
 
 
 class ProviderError(Exception):
@@ -35,20 +35,11 @@ def observation_is_stale(observation, now=None):
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a8df523b3ef"
 
 
-def _rpc(url, method, params):
+def _rpc(chain, method, params):
     try:
-        response = requests.post(
-            url,
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-            timeout=20,
-        )
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
+        return rpc_result(chain, method, params)
+    except Exception as exc:
         raise ProviderError("chain provider request failed") from exc
-    if payload.get("error"):
-        raise ProviderError("chain provider returned an error")
-    return payload.get("result")
 
 
 def _rpc_urls():
@@ -58,7 +49,7 @@ def _rpc_urls():
         raise ProviderError("CONI_RPC_URLS is not valid JSON") from exc
     if not isinstance(value, dict):
         raise ProviderError("CONI_RPC_URLS must be a JSON object")
-    return {str(chain): str(url) for chain, url in value.items() if str(url).startswith(("https://", "http://"))}
+    return value
 
 
 def _expected_chain_ids():
@@ -112,12 +103,12 @@ def _verify_evm(observation):
     if not url:
         raise ProviderError(f"no RPC configured for {observation.chain}")
     expected_chain_id = _expected_chain_ids().get(observation.chain)
-    actual_chain_id = _rpc(url, "eth_chainId", [])
+    actual_chain_id = _rpc(observation.chain, "eth_chainId", [])
     if not expected_chain_id or str(actual_chain_id).lower() != str(expected_chain_id).lower():
         raise ProviderError(f"RPC chain identity is not configured for {observation.chain}")
     if getattr(observation, "asset", native_asset(observation.chain)) != native_asset(observation.chain):
-        return _verify_evm_token(observation, url)
-    transaction_data = _rpc(url, "eth_getTransactionByHash", [observation.tx_hash])
+        return _verify_evm_token(observation)
+    transaction_data = _rpc(observation.chain, "eth_getTransactionByHash", [observation.tx_hash])
     if not transaction_data:
         return "pending"
     sender = str(transaction_data.get("from", ""))
@@ -128,13 +119,13 @@ def _verify_evm(observation):
         raise VerificationError("sender or destination mismatch")
     if value != expected:
         raise VerificationError("amount mismatch")
-    receipt = _rpc(url, "eth_getTransactionReceipt", [observation.tx_hash])
+    receipt = _rpc(observation.chain, "eth_getTransactionReceipt", [observation.tx_hash])
     if not receipt:
         return "pending"
     if receipt.get("status") != "0x1":
         raise VerificationError("transaction reverted")
     block_number = _hex_int(receipt.get("blockNumber"))
-    latest = _hex_int(_rpc(url, "eth_blockNumber", []))
+    latest = _hex_int(_rpc(observation.chain, "eth_blockNumber", []))
     confirmations = max(0, latest - block_number + 1)
     raw = {"from": sender, "to": destination, "value": transaction_data.get("value"), "receiptStatus": receipt.get("status")}
     if confirmations < settings.CONI_DEPOSIT_CONFIRMATIONS:
@@ -144,12 +135,12 @@ def _verify_evm(observation):
     return "credited"
 
 
-def _verify_evm_token(observation, url):
+def _verify_evm_token(observation):
     config = token_config(observation.asset, observation.chain) or {}
     token_address = str(config.get("address", ""))
     if not token_address:
         raise VerificationError("token is not configured for this chain")
-    receipt = _rpc(url, "eth_getTransactionReceipt", [observation.tx_hash])
+    receipt = _rpc(observation.chain, "eth_getTransactionReceipt", [observation.tx_hash])
     if not receipt:
         return "pending"
     if receipt.get("status") != "0x1":
@@ -169,7 +160,7 @@ def _verify_evm_token(observation, url):
     if matching is None:
         raise VerificationError("token transfer does not match deposit observation")
     block_number = _hex_int(receipt.get("blockNumber"))
-    latest = _hex_int(_rpc(url, "eth_blockNumber", []))
+    latest = _hex_int(_rpc(observation.chain, "eth_blockNumber", []))
     confirmations = max(0, latest - block_number + 1)
     raw = {"token": token_address, "from": observation.sender, "to": observation.destination, "value": str(observation.amount_base_units), "logIndex": observation.event_index, "receiptStatus": receipt.get("status")}
     if confirmations < settings.CONI_DEPOSIT_CONFIRMATIONS:
@@ -205,10 +196,8 @@ def _solana_native_transfer_match(transaction_data, event_index, sender, destina
 
 
 def _verify_solana(observation):
-    if not settings.CONI_SOLANA_RPC_URL:
-        raise ProviderError("no Solana RPC configured")
     transaction_data = _rpc(
-        settings.CONI_SOLANA_RPC_URL,
+        "solana",
         "getTransaction",
         [observation.tx_hash, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}],
     )

@@ -1,4 +1,5 @@
 from django.core.management.base import BaseCommand
+from django.conf import settings
 
 from core.arbitrage import scan_opportunities
 from core.pangea import PangeaError
@@ -9,7 +10,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--once", action="store_true", help="Run one scan and exit.")
-        parser.add_argument("--loop-seconds", type=int, default=30, help="Delay between scans.")
+        parser.add_argument("--loop-seconds", type=int, default=int(getattr(settings, "CONI_ARBITRAGE_SCAN_INTERVAL_SECONDS", 10)), help="Delay between scans.")
 
     def handle(self, *args, **options):
         import time
@@ -25,4 +26,4 @@ class Command(BaseCommand):
                     raise SystemExit(2) from exc
             if options["once"]:
                 return
-            time.sleep(max(10, options["loop_seconds"]))
+            time.sleep(max(5, options["loop_seconds"]))

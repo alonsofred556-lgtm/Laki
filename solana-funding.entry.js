@@ -1,5 +1,6 @@
 import {
   Connection,
+  Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
@@ -14,6 +15,28 @@ import {
 
 const SOLANA_TOKEN_PROGRAM = String(TOKEN_PROGRAM_ADDRESS);
 
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function decodeBase58(value) {
+  const bytes = [0];
+  for (const character of String(value || "")) {
+    const index = BASE58.indexOf(character);
+    if (index < 0) throw new Error("invalid local Solana secret");
+    let carry = index;
+    for (let offset = 0; offset < bytes.length; offset += 1) {
+      const current = bytes[offset] * 58 + carry;
+      bytes[offset] = current & 255;
+      carry = current >> 8;
+    }
+    while (carry) { bytes.push(carry & 255); carry >>= 8; }
+  }
+  let leading = 0;
+  while (leading < String(value || "").length && String(value)[leading] === "1") leading += 1;
+  const decoded = bytes.reverse();
+  if (decoded.length && decoded[0] === 0) decoded.shift();
+  return Uint8Array.from([...new Array(leading).fill(0), ...decoded]);
+}
+
 function walletSigner(address) {
   return createNoopSigner(address);
 }
@@ -26,7 +49,15 @@ function signatureFrom(result) {
   return signature;
 }
 
-async function sendWithProvider(provider, transaction, connection) {
+async function sendWithProvider(provider, transaction, connection, secret, from) {
+  if (secret) {
+    const decoded = decodeBase58(secret);
+    if (decoded.length !== 64) throw new Error("local Solana secret must contain 64 bytes");
+    const keypair = await Keypair.fromSecretKey(decoded);
+    if (keypair.publicKey.toBase58() !== from) throw new Error("local Solana wallet does not match the authenticated address");
+    await transaction.partialSign(keypair);
+    return signatureFrom(await connection.sendRawTransaction(await transaction.serialize(), { preflightCommitment: "confirmed" }));
+  }
   if (typeof provider?.signAndSendTransaction === "function") {
     return signatureFrom(await provider.signAndSendTransaction(transaction, { preflightCommitment: "confirmed" }));
   }
@@ -36,7 +67,7 @@ async function sendWithProvider(provider, transaction, connection) {
   if (typeof provider?.signTransaction === "function") {
     const signed = await provider.signTransaction(transaction);
     if (!signed?.serialize) throw new Error("The Solana wallet returned no serialized transaction");
-    return signatureFrom(await connection.sendRawTransaction(signed.serialize(), { preflightCommitment: "confirmed" }));
+    return signatureFrom(await connection.sendRawTransaction(await signed.serialize(), { preflightCommitment: "confirmed" }));
   }
   throw new Error("This Solana wallet does not support transaction approval");
 }
@@ -49,7 +80,7 @@ async function preparedTransaction({ rpcUrl, from, destination, amountBaseUnits,
   const latest = await connection.getLatestBlockhash("confirmed");
   const transaction = new Transaction({
     feePayer: source,
-    recentBlockhash: latest.blockhash,
+    blockhash: latest.blockhash,
     lastValidBlockHeight: latest.lastValidBlockHeight,
   });
 
@@ -97,11 +128,11 @@ async function preparedTransaction({ rpcUrl, from, destination, amountBaseUnits,
   return { connection, transaction, eventIndex };
 }
 
-async function sendFunding({ provider, rpcUrl, from, destination, amountBaseUnits, asset, tokenAddress, tokenProgram, decimals }) {
+async function sendFunding({ provider, secret, rpcUrl, from, destination, amountBaseUnits, asset, tokenAddress, tokenProgram, decimals }) {
   const prepared = await preparedTransaction({ rpcUrl, from, destination, amountBaseUnits, asset, tokenAddress, tokenProgram, decimals });
-  const simulation = await prepared.connection.simulateTransaction(prepared.transaction, { sigVerify: false });
+  const simulation = await prepared.connection.simulateTransaction(prepared.transaction);
   if (simulation.value?.err) throw new Error("Solana rejected the funding transaction during simulation");
-  const signature = await sendWithProvider(provider, prepared.transaction, prepared.connection);
+  const signature = await sendWithProvider(provider, prepared.transaction, prepared.connection, secret, from);
   return { signature, eventIndex: prepared.eventIndex };
 }
 

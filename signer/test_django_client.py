@@ -126,6 +126,76 @@ class DjangoSignerClientTests(unittest.TestCase):
             )
         opener.assert_not_called()
 
+    def test_pull_fee_intents_requires_public_recipient_and_signer_reference(self):
+        opener = Mock(return_value=FakeResponse({"fees": [{
+            "feeId": "00000000-0000-4000-8000-000000000001",
+            "idempotencyKey": "fee-abc123",
+            "kind": "funding",
+            "sourceId": "deposit-event-1",
+            "executionId": None,
+            "userIdentityId": "00000000-0000-4000-8000-000000000003",
+            "chain": "base",
+            "asset": "ETH",
+            "grossAmountBaseUnits": "10000",
+            "amountBaseUnits": "10",
+            "feeBps": 10,
+            "recipient": "0x2222222222222222222222222222222222222222",
+            "signerKeyRef": "hsm:key:fee-base",
+            "attempt": 1,
+            "leaseUntil": "2026-10-27T08:00:00+00:00",
+        }]}))
+        client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
+        result = client.pull_fee_intents(limit=1)
+        self.assertEqual(result[0].amount_base_units, "10")
+        self.assertEqual(result[0].fee_bps, 10)
+        self.assertEqual(result[0].recipient, "0x2222222222222222222222222222222222222222")
+
+    def test_pull_execution_intent_accepts_cross_chain_bridge_leg(self):
+        execution_id = "00000000-0000-4000-8000-000000000001"
+        wallet_id = "00000000-0000-4000-8000-000000000002"
+        sell_wallet_id = "00000000-0000-4000-8000-000000000003"
+        payload = {
+            "intent": {
+                "executionId": execution_id,
+                "slug": "example-token",
+                "quoteHash": "a" * 64,
+                "quoteArtifact": {"trade": {}, "bridge": {}},
+                "expectedProfitUsd": "0.25",
+                "botWallet": {"id": wallet_id, "chain": "base", "address": "0x" + "1" * 40, "signerKeyRef": "hsm:key:base-1"},
+                "sellBotWallet": {"id": sell_wallet_id, "chain": "solana", "address": "Abcdefghijkmnpqrstuvwxyz123456789", "signerKeyRef": "hsm:key:sol-1"},
+                "legs": [
+                    {"kind": "buy", "chain": "base", "quoteHash": "b" * 64, "amountInBaseUnits": "100", "amountOutBaseUnits": "200"},
+                    {"kind": "bridge", "chain": "base->solana", "quoteHash": "c" * 64, "amountInBaseUnits": "200", "amountOutBaseUnits": "199"},
+                    {"kind": "sell", "chain": "solana", "quoteHash": "d" * 64, "amountInBaseUnits": "199", "amountOutBaseUnits": "0"},
+                ],
+                "expiresAt": "2026-10-28T12:00:00+00:00",
+            }
+        }
+        opener = Mock(return_value=FakeResponse(payload))
+        client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
+        result = client.pull_execution_intent(execution_id=execution_id, idempotency_key="execution-intent-1")
+        self.assertEqual(result["legs"][1]["chain"], "base->solana")
+        request_body = json.loads(opener.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(request_body, {"executionId": execution_id, "idempotencyKey": "execution-intent-1"})
+
+    def test_execution_intent_rejects_forbidden_secret_fields(self):
+        payload = {"intent": {"executionId": "00000000-0000-4000-8000-000000000001", "privateKey": "never"}}
+        opener = Mock(return_value=FakeResponse(payload))
+        client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
+        with self.assertRaises(DjangoSignerClientError):
+            client.pull_execution_intent(execution_id="00000000-0000-4000-8000-000000000001", idempotency_key="execution-intent-2")
+
+    def test_execution_event_rejects_missing_proof_before_network(self):
+        opener = Mock(return_value=FakeResponse({"ok": True}))
+        client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)
+        with self.assertRaises(ValueError):
+            client.record_execution_event(
+                execution_id="00000000-0000-4000-8000-000000000001",
+                event="buy-confirmed",
+                idempotency_key="execution-event-1",
+            )
+        opener.assert_not_called()
+
     def test_django_error_object_fails_closed(self):
         opener = Mock(return_value=FakeResponse({"error": "unauthorized"}))
         client = DjangoSignerClient("https://coni.internal", "s" * 32, opener=opener)

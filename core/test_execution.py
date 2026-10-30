@@ -8,13 +8,15 @@ from django.test import SimpleTestCase
 django.setup()
 
 from .execution import (
+    _quote_artifact_is_fresh,
     _quote_hash,
     execution_event_requires_bridge_guid,
     execution_event_requires_tx_hash,
     next_execution_state,
     signer_wallets_ready,
 )
-from .bot_wallets import bot_transfer_event_requires_tx_hash, next_bot_transfer_state
+from .bot_wallets import bot_transfer_direction_allowed, bot_transfer_event_requires_tx_hash, next_bot_transfer_state, validate_bot_transfer_proof
+from .funding import next_withdrawal_state, validate_withdrawal_proof
 from .profit_settlement import next_settlement_state, settlement_event_requires_tx_hash
 
 
@@ -73,6 +75,13 @@ class ExecutionLifecycleTests(SimpleTestCase):
         equivalent = {"bridge": {"route": "canonical"}, "trade": {"buy": {"amount": "10"}}}
         self.assertEqual(_quote_hash(artifact), _quote_hash(equivalent))
 
+    def test_stale_quote_artifact_is_rejected_before_signer_handoff(self):
+        artifact = {
+            "trade": {"_coniQuotedAt": 1},
+            "bridge": {"_coniQuotedAt": 1},
+        }
+        self.assertFalse(_quote_artifact_is_fresh(artifact))
+
     def test_bot_transfer_callbacks_are_strictly_ordered(self):
         self.assertEqual(next_bot_transfer_state("pending-approval", "submitted"), "submitted")
         self.assertEqual(next_bot_transfer_state("submitted", "confirmed"), "confirmed")
@@ -84,6 +93,35 @@ class ExecutionLifecycleTests(SimpleTestCase):
         self.assertTrue(bot_transfer_event_requires_tx_hash("confirmed"))
         self.assertFalse(bot_transfer_event_requires_tx_hash("failed"))
 
+    def test_bot_topups_use_the_verified_funding_intent_path(self):
+        self.assertFalse(bot_transfer_direction_allowed("topup"))
+        self.assertTrue(bot_transfer_direction_allowed("withdrawal"))
+
+    def test_leased_bot_transfer_can_only_be_submitted_or_failed(self):
+        self.assertEqual(next_bot_transfer_state("leased", "submitted"), "submitted")
+        self.assertEqual(next_bot_transfer_state("leased", "failed"), "failed")
+
+    def test_bot_transfer_proof_binds_exact_intent_and_finality(self):
+        transfer = type("Transfer", (), {
+            "chain": "base",
+            "asset": "ETH",
+            "amount_base_units": "100",
+            "destination": "0x1111111111111111111111111111111111111111",
+        })()
+        proof = {
+            "chain": "base",
+            "asset": "ETH",
+            "amountBaseUnits": "100",
+            "destination": transfer.destination,
+            "verified": True,
+            "finality": "confirmed",
+        }
+        validate_bot_transfer_proof(transfer, "confirmed", proof)
+        with self.assertRaises(ValueError):
+            validate_bot_transfer_proof(transfer, "confirmed", {**proof, "amountBaseUnits": "101"})
+        with self.assertRaises(ValueError):
+            validate_bot_transfer_proof(transfer, "confirmed", {**proof, "finality": "pending"})
+
     def test_profit_settlement_requires_submitted_before_confirmation(self):
         self.assertEqual(next_settlement_state("pending-approval", "submitted"), "submitted")
         self.assertEqual(next_settlement_state("submitted", "confirmed"), "confirmed")
@@ -94,3 +132,32 @@ class ExecutionLifecycleTests(SimpleTestCase):
         self.assertTrue(settlement_event_requires_tx_hash("submitted"))
         self.assertTrue(settlement_event_requires_tx_hash("confirmed"))
         self.assertFalse(settlement_event_requires_tx_hash("failed"))
+
+    def test_normal_withdrawal_lifecycle_requires_manual_approval_before_signer(self):
+        self.assertEqual(next_withdrawal_state("leased", "submitted"), "broadcasting")
+        self.assertEqual(next_withdrawal_state("broadcasting", "confirmed"), "completed")
+        with self.assertRaises(ValueError):
+            next_withdrawal_state("approved", "confirmed")
+
+    def test_normal_withdrawal_proof_binds_nonce_and_finality(self):
+        withdrawal = type("Withdrawal", (), {
+            "chain": "base",
+            "asset": "ETH",
+            "amount_base_units": "100",
+            "destination": "0x1111111111111111111111111111111111111111",
+            "nonce": "withdrawal-nonce-1",
+        })()
+        proof = {
+            "chain": "base",
+            "asset": "ETH",
+            "amountBaseUnits": "100",
+            "destination": withdrawal.destination,
+            "nonce": withdrawal.nonce,
+            "verified": True,
+            "finality": "finalized",
+        }
+        validate_withdrawal_proof(withdrawal, "confirmed", proof)
+        with self.assertRaises(ValueError):
+            validate_withdrawal_proof(withdrawal, "confirmed", {**proof, "nonce": "other"})
+        with self.assertRaises(ValueError):
+            validate_withdrawal_proof(withdrawal, "confirmed", {**proof, "finality": "pending"})

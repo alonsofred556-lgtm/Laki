@@ -5,13 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#081011" />
     <title>Coni — cross-chain execution console</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="preconnect" href="https://www.pangea.trade" crossorigin />
+    <link rel="stylesheet" href="styles.css" /><link rel="stylesheet" href="theme.css" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Primary navigation">
         <a class="brand" href="#overview" aria-label="Coni home">
-          <img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" />
+          <img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" width="36" height="36" decoding="async" fetchpriority="high" />
           <span><strong>coni</strong><small>cross-chain desk</small></span>
         </a>
         <div class="side-label">Workspace</div>
@@ -33,7 +34,7 @@
 
       <main class="main-content">
         <header class="topbar">
-          <div class="mobile-brand"><img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" /><strong>coni</strong></div>
+          <div class="mobile-brand"><img class="brand-image" src="assets/coni_logo_icon-2.png" alt="" width="26" height="26" decoding="async" /><strong>coni</strong></div>
           <div class="breadcrumb"><span>Workspace</span><b>/</b><strong>Overview</strong></div>
           <div class="top-actions">
             <button class="icon-button" aria-label="Notifications">◔<span class="notification-dot"></span></button>
@@ -65,7 +66,8 @@
             <section class="opportunity-panel">
               <div class="panel-head"><div><strong>Live routes</strong><span>Ranked by observed spread · executable quotes required</span></div><div class="filter-tabs"><button class="filter-tab active">All</button><button class="filter-tab">ZGAP</button><button class="filter-tab">New</button></div></div>
               <div class="opportunity-list" id="opportunity-list"></div>
-              <div class="panel-foot"><span><i class="tiny-live"></i> Data refreshes every 15 seconds</span><a href="https://www.pangea.trade/app/docs#api" target="_blank" rel="noreferrer">View Pangea docs ↗</a></div>
+              <button class="secondary-button full-width" id="load-more-opportunities" hidden>Load more live launches</button>
+              <div class="panel-foot"><span><i class="tiny-live"></i> Data refreshes every 15 seconds · Pangea pools are complete</span><a href="https://www.pangea.trade/app/docs#api" target="_blank" rel="noreferrer">View Pangea docs ↗</a></div>
             </section>
 
             <aside class="side-panel" id="vault">
@@ -74,6 +76,12 @@
               <div class="chain-strip"><span>Supported networks</span><div><b class="chain eth">E</b><b class="chain base">B</b><b class="chain rh">R</b><b class="chain bnb">B</b><b class="chain sol">S</b></div></div>
             </aside>
           </div>
+
+          <section class="motion-discovery-card" id="motion-discovery" hidden>
+            <div class="section-heading compact"><div><span class="section-kicker">SUPPLEMENTARY SIGNAL</span><h2>Motion discoveries</h2></div><span class="live-tag" id="motion-discovery-status">READ-ONLY</span></div>
+            <p class="motion-discovery-copy">Motion’s live market feed highlights Robinhood, BNB, and Solana tokens. These rows enrich research only; Coni still validates executable routes with fresh Pangea quotes.</p>
+            <div class="motion-discovery-list" id="motion-discovery-list"></div>
+          </section>
 
           <section class="lower-grid" id="activity">
             <article class="activity-card"><div class="section-heading compact"><div><span class="section-kicker">02 / TAPE</span><h2>Recent activity</h2></div><a href="#activity" class="text-link">See all ↗</a></div><div id="activity-feed"><div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>Reading Pangea activity…</strong><p>Recent trades and bridge transfers will appear here.</p></div></div></div></article>
@@ -86,8 +94,8 @@
     </div>
 
     <div class="modal-backdrop" id="wallet-modal" hidden><div class="modal" role="dialog" aria-modal="true" aria-labelledby="wallet-modal-title"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">WALLET GATE</span><h2 id="wallet-modal-title">Your keys stay yours.</h2><p>Open the wallet control center to connect Phantom, SafePal, OKX, or another supported provider. Coni never asks this site for a seed phrase or private key.</p><div class="provider-list"><button class="provider-row" data-connect-provider="EVM wallet" data-connect-chain="evm"><span class="provider-icon eth">E</span><span><strong>EVM wallet</strong><small>Ethereum · Base · Robinhood · BNB</small></span><b>↗</b></button><button class="provider-row" data-connect-provider="Solana wallet" data-connect-chain="solana"><span class="provider-icon sol">S</span><span><strong>Solana wallet</strong><small>Solana · Meteora routes</small></span><b>↗</b></button></div><div class="modal-note"><span>i</span> The wallet page requests the free ownership signature and never requests a transaction just to sign in.</div></div></div>
-    <div class="modal-backdrop" id="preview-modal" hidden><div class="modal preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">LIVE QUOTE PREVIEW</span><h2 id="preview-title">Route preview</h2><div class="preview-route" id="preview-route"></div><div class="preview-stats" id="preview-stats"></div><div class="preview-quote" id="preview-quote" aria-live="polite">No quote requested.</div><button class="primary-button full-width" id="prepare-route" disabled>Run scanner worker first <span>→</span></button><div class="modal-note"><span>✓</span> This action remains gated. When enabled, Coni re-quotes for your authenticated bot wallets before any signer request.</div></div></div>
+    <div class="modal-backdrop" id="preview-modal" hidden><div class="modal preview-modal" role="dialog" aria-modal="true" aria-labelledby="preview-title"><button class="modal-close" data-close-modal>×</button><span class="modal-kicker">LIVE ARBITRAGE DETAIL</span><div class="preview-token-head"><span class="preview-token-logo" id="preview-token-logo"></span><div><h2 id="preview-title">Route preview</h2><p id="preview-token-subtitle">Live Pangea pool snapshot</p></div></div><div class="preview-route" id="preview-route"></div><div class="preview-stats" id="preview-stats"></div><div class="preview-chain-title"><span>Live route markets</span><small id="preview-read-at">Reading current pool snapshot…</small></div><div class="preview-chains" id="preview-chains"></div><div class="preview-quote" id="preview-quote" aria-live="polite">No quote requested.</div><button class="primary-button full-width" id="prepare-route" disabled>Run scanner worker first <span>→</span></button><div class="modal-note"><span>✓</span> $10 figures begin with the observed pool spread. Pangea quotes refresh the route costs; no spread is treated as guaranteed profit. Execution remains signer-gated.</div></div></div>
 
-    <script src="config.js"></script><script src="app.js"></script>
+    <script defer src="config.js"></script><script defer src="ui.js"></script><script defer src="app.js"></script>
   </body>
 </html>

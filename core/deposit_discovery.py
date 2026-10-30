@@ -11,11 +11,24 @@ from django.utils import timezone
 
 from .assets import native_asset, recipient_for, token_registry
 from .audit import record_event
-from .chain_verifier import ProviderError, VerificationError, _expected_chain_ids, _hex_int, _rpc, _rpc_urls
+from .chain_verifier import ProviderError, VerificationError, _expected_chain_ids, _hex_int, _rpc_urls
 from .models import ChainCursor, DepositObservation, FundingIntent
+from .rpc import result as rpc_result
 
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a8df523b3ef"
+
+
+def _provider_rpc(chain, method, params):
+    """Use the allowlisted chain RPC and preserve worker retry semantics."""
+    try:
+        return rpc_result(chain, method, params)
+    except Exception as exc:
+        raise ProviderError("chain provider request failed") from exc
+
+
+def _address_key(chain, address):
+    return address if chain == "solana" else address.lower()
 
 
 def _targets(chain):
@@ -23,7 +36,7 @@ def _targets(chain):
     native = native_asset(chain)
     recipient = recipient_for(native, chain) if native else ""
     if recipient:
-        targets[native] = {recipient.lower()}
+        targets[native] = {recipient if chain == "solana" else recipient.lower()}
     for asset, config in token_registry().items():
         if not isinstance(config, dict):
             continue
@@ -31,37 +44,38 @@ def _targets(chain):
         address = chain_config.get("address") if isinstance(chain_config, dict) else chain_config
         recipient = recipient_for(asset, chain)
         if address and recipient:
-            targets.setdefault(asset, set()).add(recipient.lower())
+            targets.setdefault(asset, set()).add(recipient if chain == "solana" else recipient.lower())
     # Active per-user bot wallets are valid deposit recipients. They are still
     # credited only when matched to an exact, unexpired funding intent.
     from .models import BotWallet
-    for wallet in BotWallet.objects.filter(chain=chain, status="active").exclude(address=""):
+    for wallet in BotWallet.objects.filter(chain=chain, status="active", signer_key_ref__gt="").exclude(address=""):
         for asset in token_registry().keys():
-            targets.setdefault(asset, set()).add(wallet.address.lower())
+            targets.setdefault(asset, set()).add(wallet.address if chain == "solana" else wallet.address.lower())
         native = native_asset(chain)
         if native:
-            targets.setdefault(native, set()).add(wallet.address.lower())
+            targets.setdefault(native, set()).add(wallet.address if chain == "solana" else wallet.address.lower())
     return targets
 
 
 def _identity_and_intent(chain, asset, sender, destination, amount):
-    candidates = FundingIntent.objects.filter(
-        chain=chain,
-        asset=asset,
-        destination__iexact=destination,
-        amount_base_units=amount,
-        status__in=["awaiting-wallet-approval", "pending-verification"],
-    ).select_related("wallet_identity")
+    intent_filters = {
+        "chain": chain,
+        "asset": asset,
+        "amount_base_units": amount,
+        "status__in": ["awaiting-wallet-approval", "pending-verification"],
+    }
+    intent_filters["destination" if chain == "solana" else "destination__iexact"] = destination
+    candidates = FundingIntent.objects.filter(**intent_filters).select_related("wallet_identity")
     for intent in candidates:
-        if intent.wallet_identity and intent.wallet_identity.address.lower() == sender.lower():
+        if intent.wallet_identity and (intent.wallet_identity.address == sender if chain == "solana" else intent.wallet_identity.address.lower() == sender.lower()):
             return intent.wallet_identity, intent
     # A transfer into an active per-user bot wallet is discoverable even when
     # the user did not create an intent first. Keep it explicitly unclaimed;
     # the owner must claim it and the verifier must still prove finality.
     from .models import BotWallet
-    wallet = BotWallet.objects.filter(
-        chain=chain, status="active", address__iexact=destination,
-    ).select_related("owner").first()
+    wallet_filters = {"chain": chain, "status": "active", "signer_key_ref__gt": ""}
+    wallet_filters["address" if chain == "solana" else "address__iexact"] = destination
+    wallet = BotWallet.objects.filter(**wallet_filters).select_related("owner").first()
     if wallet:
         return wallet.owner, None
     return None, None
@@ -69,7 +83,7 @@ def _identity_and_intent(chain, asset, sender, destination, amount):
 
 def _record_candidate(*, chain, asset, sender, destination, tx_hash, event_index, amount, block_number, block_hash, raw_event):
     identity, intent = _identity_and_intent(chain, asset, sender, destination, amount)
-    event_key = f"{chain}:{tx_hash.lower()}:{event_index}"
+    event_key = f"{chain}:{tx_hash.lower() if chain != 'solana' else tx_hash}:{event_index}"
     defaults = {
         "funding_intent": intent,
         "wallet_identity": identity,
@@ -121,17 +135,17 @@ def discover_evm_chain(chain):
     if not url:
         return {"chain": chain, "status": "provider-unavailable", "created": 0}
     expected = _expected_chain_ids().get(chain)
-    if not expected or str(_rpc(url, "eth_chainId", [])).lower() != str(expected).lower():
+    if not expected or str(_provider_rpc(chain, "eth_chainId", [])).lower() != str(expected).lower():
         raise ProviderError(f"RPC chain identity is not configured for {chain}")
     cursor = _cursor(chain)
     if cursor.cursor_number is not None and cursor.cursor_hash:
-        canonical = _rpc(url, "eth_getBlockByNumber", [hex(cursor.cursor_number), False]) or {}
+        canonical = _provider_rpc(chain, "eth_getBlockByNumber", [hex(cursor.cursor_number), False]) or {}
         if canonical.get("hash") != cursor.cursor_hash:
             cursor.cursor_number = max(0, cursor.cursor_number - settings.CONI_DEPOSIT_CONFIRMATIONS)
             cursor.cursor_hash = None
             cursor.status = "reorg-rewind"
             cursor.save(update_fields=["cursor_number", "cursor_hash", "status", "updated_at"])
-    latest = _hex_int(_rpc(url, "eth_blockNumber", []))
+    latest = _hex_int(_provider_rpc(chain, "eth_blockNumber", []))
     cursor, start, end = _block_range(chain, latest)
     if start is None:
         cursor.status = "idle"
@@ -146,7 +160,7 @@ def discover_evm_chain(chain):
         native = native_asset(chain)
         native_targets = targets.get(native, set())
         for number in range(start, end + 1):
-            block = _rpc(url, "eth_getBlockByNumber", [hex(number), True]) or {}
+            block = _provider_rpc(chain, "eth_getBlockByNumber", [hex(number), True]) or {}
             for index, tx_data in enumerate(block.get("transactions") or []):
                 destination = str(tx_data.get("to") or "")
                 value = _hex_int(tx_data.get("value", "0x0"))
@@ -162,7 +176,7 @@ def discover_evm_chain(chain):
                 continue
             for destination in asset_targets:
                 topic_to = "0x" + destination[2:].lower().rjust(64, "0")
-                logs = _rpc(url, "eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end), "address": token_address, "topics": [TRANSFER_TOPIC, None, topic_to]}]) or []
+                logs = _provider_rpc(chain, "eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end), "address": token_address, "topics": [TRANSFER_TOPIC, None, topic_to]}]) or []
                 for log in logs:
                     topics = log.get("topics") or []
                     if len(topics) < 3:
@@ -173,7 +187,7 @@ def discover_evm_chain(chain):
                     _, was_created = _record_candidate(chain=chain, asset=asset, sender=sender, destination=recipient, tx_hash=log.get("transactionHash", ""), event_index=_hex_int(log.get("logIndex", "0x0")), amount=amount, block_number=_hex_int(log.get("blockNumber", hex(start))), block_hash=log.get("blockHash"), raw_event={"type": "erc20-transfer", "token": token_address, "logIndex": log.get("logIndex")})
                     created += int(was_created)
         cursor.cursor_number = end
-        cursor.cursor_hash = _rpc(url, "eth_getBlockByNumber", [hex(end), False]).get("hash")
+        cursor.cursor_hash = _provider_rpc(chain, "eth_getBlockByNumber", [hex(end), False]).get("hash")
         cursor.status = "healthy"
         cursor.last_scan_at = timezone.now()
         cursor.last_success_at = timezone.now()
@@ -198,14 +212,14 @@ def _solana_native_recipients():
     from .models import BotWallet
     recipients.update(
         wallet.address
-        for wallet in BotWallet.objects.filter(chain=chain, status="active").exclude(address="")
+        for wallet in BotWallet.objects.filter(chain=chain, status="active", signer_key_ref__gt="").exclude(address="")
         if wallet.address
     )
     return sorted(recipients, key=str.lower)
 
 
 def _solana_native_cursor(recipient):
-    digest = hashlib.sha256(recipient.lower().encode("utf-8")).hexdigest()[:20]
+    digest = hashlib.sha256(recipient.encode("utf-8")).hexdigest()[:20]
     return ChainCursor.objects.get_or_create(key=f"solana:native:{digest}", defaults={"chain": "solana"})[0]
 
 
@@ -223,12 +237,12 @@ def discover_solana():
         params = [recipient, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
         if cursor.cursor_hash:
             params[1]["before"] = cursor.cursor_hash
-        signatures = _rpc(settings.CONI_SOLANA_RPC_URL, "getSignaturesForAddress", params) or []
+        signatures = _provider_rpc(chain, "getSignaturesForAddress", params) or []
         for item in reversed(signatures):
             signature = item.get("signature")
             if not signature or item.get("err"):
                 continue
-            transaction_data = _rpc(settings.CONI_SOLANA_RPC_URL, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
+            transaction_data = _provider_rpc(chain, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
             if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
                 continue
             instructions = list(((transaction_data.get("transaction") or {}).get("message") or {}).get("instructions") or [])
@@ -261,6 +275,14 @@ def _spl_cursor(asset, token_account):
     return ChainCursor.objects.get_or_create(key=f"solspl:{asset}:{digest}", defaults={"chain": "solana"})[0]
 
 
+def _spl_account_lookup_params(mint):
+    """Return Solana's positional filter and config for token-account lookup."""
+    return [
+        {"mint": mint},
+        {"encoding": "jsonParsed", "commitment": "finalized"},
+    ]
+
+
 def _solana_instruction_matches(transaction_data, token_account, mint, program_id):
     """Yield parsed SPL transfers into one treasury token account."""
     instructions = []
@@ -287,7 +309,10 @@ def _solana_instruction_matches(transaction_data, token_account, mint, program_i
         destination_balance = balances.get(token_account) or {}
         if destination_balance.get("mint") != mint:
             continue
-        if program_id and destination_balance.get("programId") and destination_balance.get("programId") != program_id:
+        # If the registry pins a token program, an omitted program id is not
+        # sufficient evidence.  Do not discover a transfer through a provider
+        # response that could belong to a different SPL program.
+        if program_id and destination_balance.get("programId") != program_id:
             continue
         amount_data = info.get("tokenAmount") or {}
         amount = amount_data.get("amount") or info.get("amount")
@@ -320,15 +345,14 @@ def discover_solana_spl():
             recipients.add(treasury_recipient)
         recipients.update(
             wallet.address
-            for wallet in BotWallet.objects.filter(chain=chain, status="active").exclude(address="")
+            for wallet in BotWallet.objects.filter(chain=chain, status="active", signer_key_ref__gt="").exclude(address="")
             if wallet.address
         )
         if not mint or not recipients:
             continue
         for recipient in sorted(recipients):
             configured += 1
-            account_params = {"mint": mint, "encoding": "jsonParsed", "commitment": "finalized"}
-            account_data = _rpc(rpc, "getTokenAccountsByOwner", [recipient, account_params]) or {}
+            account_data = _provider_rpc(chain, "getTokenAccountsByOwner", [recipient, *_spl_account_lookup_params(mint)]) or {}
             accounts = (account_data.get("value") if isinstance(account_data, dict) else None) or []
             for account in accounts:
                 token_account = account.get("pubkey") if isinstance(account, dict) else None
@@ -338,12 +362,12 @@ def discover_solana_spl():
                 params = [token_account, {"limit": min(settings.CONI_DEPOSIT_SCAN_BATCH, 1000), "commitment": "finalized"}]
                 if cursor.cursor_hash:
                     params[1]["before"] = cursor.cursor_hash
-                signatures = _rpc(rpc, "getSignaturesForAddress", params) or []
+                signatures = _provider_rpc(chain, "getSignaturesForAddress", params) or []
                 for signature_data in reversed(signatures):
                     signature = signature_data.get("signature")
                     if not signature or signature_data.get("err"):
                         continue
-                    transaction_data = _rpc(rpc, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
+                    transaction_data = _provider_rpc(chain, "getTransaction", [signature, {"encoding": "jsonParsed", "commitment": "finalized", "maxSupportedTransactionVersion": 0}])
                     if not transaction_data or transaction_data.get("meta", {}).get("err") is not None:
                         continue
                     for instruction_index, info, amount, destination_balance in _solana_instruction_matches(transaction_data, token_account, mint, program_id):

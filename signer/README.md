@@ -18,7 +18,10 @@ the `provisionRequestId`, public address, opaque `signerKeyRef`, and attestation
 hash. Never send a private key to Django.
 
 `signer/django_client.py` contains the provider-neutral, HMAC-authenticated
-transport for this exchange. The HSM/MPC adapter should call
+transport for this exchange. Its `pull_execution_intent()` and
+`record_execution_event()` methods validate the cross-chain route shape,
+transaction-proof requirements, idempotency fields, and reject secret fields
+before making a callback. The HSM/MPC adapter should call
 `DjangoSignerClient.pull_provision_requests()`, create or allocate the key
 inside custody, and call `attest_bot_wallet()`. The client rejects unexpected
 fields and invalid chain/address/hash values before any callback is sent. It
@@ -57,6 +60,16 @@ The public bot-wallet transfer endpoint intentionally rejects a `topup`
 direction. The wallet UI's Top up action creates a `FundingIntent`, and the
 deposit discovery/verifier is the only path that can credit the bot ledger.
 
+Fee transfers are a separate bounded queue. The adapter pulls
+`/api/internal/signer/fee-intents`, validates the chain, asset, recipient,
+integer amount, opaque fee key reference, source state, and policy inside
+custody, then returns `submitted` and `confirmed` proof through
+`/api/internal/signer/fee-event`. Funding fees become eligible only after the
+deposit is credited; withdrawal fees become eligible only after the requested
+withdrawal is confirmed; trade fees become eligible only after the execution
+is settled. Confirmations require `verified: true` and finalized chain
+evidence. Never infer a paid fee from a pending or leased intent.
+
 For realized profit, use `/api/internal/signer/profit-settlement-event`. A
 `confirmed` event must include metadata matching the exact configured
 recipient, USDG token, `robinhood` chain, and base-unit amount. Coni credits
@@ -78,7 +91,7 @@ Pull the bounded transfer facts first with
 fresh asset/USD valuation, construct the transfer inside custody, simulate it,
 and retain the valuation and transaction proof in its audit record.
 
-The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET` (32+ random characters), `SIGNER_DATABASE_URL`, `SIGNER_AUDIT_DATABASE_URL`, `SIGNER_AUDIT_HMAC_KEY`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), `SIGNER_MAX_VALUE_BASE_UNITS`, and `SIGNER_MAX_TOTAL_VALUE_BASE_UNITS` through a secret manager. Set `SIGNER_REQUIRED_APPROVALS=2` only when `SIGNER_APPROVER_KEYS` contains two distinct Ed25519 approver public keys and the approvers sign the exact intent digest. The PostgreSQL store prevents a retry from signing the same idempotency key twice; the separate audit store prevents a successful signing decision from existing without a durable audit append. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, aggregate amount cap, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing.
+The service must run behind private networking or mTLS. Set `SIGNER_SHARED_SECRET` (32+ random characters), `SIGNER_DATABASE_URL`, `SIGNER_AUDIT_DATABASE_URL`, `SIGNER_AUDIT_HMAC_KEY`, `SIGNER_ALLOWED_RECIPIENTS` (a chain-to-address allowlist), `SIGNER_MAX_VALUE_BASE_UNITS`, and `SIGNER_MAX_TOTAL_VALUE_BASE_UNITS` through a secret manager. Set `SIGNER_REQUIRED_APPROVALS=2` only when `SIGNER_APPROVER_KEYS` contains two distinct Ed25519 approver public keys and the approvers sign the exact intent digest. The PostgreSQL store prevents a retry from signing the same idempotency key twice; the separate audit store prevents a successful signing decision from existing without a durable audit append. Django signer callbacks require an HMAC over `timestamp + "." + exact request body` using the callback secret, timestamp headers, and a short clock-skew window. Never put a seed phrase, raw private key, or unrestricted calldata in an environment variable. The adapter must additionally enforce the token, amount limits, aggregate amount cap, nonce/idempotency, simulation result, quote hash, expiry, and two-person approval policy before signing. For the bundled Railway custody adapter, set `SIGNER_ADAPTER_SHARED_SECRET` to the same random value as `ADAPTER_SHARED_SECRET`; keep it different from `SIGNER_SHARED_SECRET` and every MPC credential.
 
 The signer exposes a fail-closed custody readiness report. Live signing requires
 mounted mTLS CA/client credentials, a private PostgreSQL store, a separate
@@ -105,6 +118,19 @@ The secret must match Django's variable of the same name and must not be
 reused as `SIGNER_SHARED_SECRET` or as any custody credential. Construct the
 client with those values and call its methods from the audited adapter's
 worker; do not expose either value to the browser.
+
+The repository also includes `signer.provisioning_worker`, which is only an
+orchestrator for the provider-neutral exchange. It is disabled unless
+`SIGNER_PROVISIONING_ENABLED=true`, and it refuses to start without
+`CONI_SIGNER_PROVISION_SESSION_KEY`. Deploy it as a separate private Railway
+worker using the same signer image and the start command
+`python -m signer.provisioning_worker`. It calls the adapter's `/v1/provision`
+endpoint, which must forward to a real MPC coordinator `/v1/provision` DKG
+operation. The worker accepts only a public address, opaque key reference,
+attestation hash, and matching request nonce; it never receives a key share.
+The nonce key is used to make retries of one leased request idempotent after a
+worker crash. Keep the worker disabled until the coordinator's DKG,
+resharing, recovery, and independent review are complete.
 
 Run locally only for policy tests:
 

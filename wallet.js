@@ -6,16 +6,43 @@
   let activeBotWallet = null;
   let botWalletSnapshot = null;
   let botFundingMode = false;
+  let pendingRecoverySecret = null;
+  let fastWalletSession = null;
+  let fastWalletLockTimer = null;
+  let localWalletModulePromise = null;
+  let solanaFundingModulePromise = null;
   let preferredBotMode = localStorage.getItem("coni.bot-wallet.mode.v1") || "external-bot";
   const STORAGE_KEY = "coni.wallet.connections.v1";
+  const FAST_WALLET_STORAGE_KEY = "coni.fast-wallet.v2";
+  const LEGACY_LOCAL_VAULT_KEY = "coni.internal.vault.v1";
+  const FAST_WALLET_IDLE_MS = 15 * 60 * 1000;
   const EVM_PROVIDER_KEY = "coni.wallet.evm-provider.v1";
   const SOLANA_PROVIDER_KEY = "coni.wallet.solana-provider.v1";
   const announcedEvmProviders = new Map();
   const pangeaTokens = new Map();
   const fundingAssets = new Map();
+  const fundingAssetCache = new Map();
+  const fundingAssetRequests = new Map();
   let pangeaTokensLoadedAt = 0;
   const solanaProviderHandlers = new WeakMap();
   const $ = (selector) => document.querySelector(selector);
+  async function runBusy(button, task) {
+    if (!button || button.dataset.busy === "true") return;
+    const wasDisabled = button.disabled;
+    const wasLoading = button.classList.contains("is-loading");
+    button.dataset.busy = "true";
+    button.disabled = true;
+    button.classList.add("is-loading", "button-pop");
+    button.setAttribute("aria-busy", "true");
+    try {
+      return await task();
+    } finally {
+      button.disabled = wasDisabled;
+      button.dataset.busy = "false";
+      if (!wasLoading) button.classList.remove("is-loading");
+      button.removeAttribute("aria-busy");
+    }
+  }
   const short = (address) => address ? `${address.slice(0, 6)}…${address.slice(-4)}` : "—";
   const chainNames = { 1: "Ethereum", 8453: "Base", 4663: "Robinhood Chain", 56: "BNB Chain" };
 
@@ -34,6 +61,66 @@
     const node = $("#wallet-message");
     node.textContent = text;
     node.dataset.tone = tone;
+  }
+
+  function cacheFastWalletSession(descriptor) {
+    if (!descriptor?.secret || !descriptor.address || !descriptor.chain) return;
+    fastWalletSession = { chain: descriptor.chain, address: descriptor.address, secret: descriptor.secret, lastUsedAt: Date.now() };
+    scheduleFastWalletLock();
+  }
+
+  function clearFastWalletSession() {
+    if (fastWalletSession) fastWalletSession.secret = "";
+    fastWalletSession = null;
+    if (fastWalletLockTimer) window.clearTimeout(fastWalletLockTimer);
+    fastWalletLockTimer = null;
+    if (typeof renderLocalVaultTools === "function" && $("#local-vault-status")) renderLocalVaultTools();
+  }
+
+  function scheduleFastWalletLock() {
+    if (fastWalletLockTimer) window.clearTimeout(fastWalletLockTimer);
+    fastWalletLockTimer = window.setTimeout(() => {
+      clearFastWalletSession();
+      message("Fast wallet locked after inactivity. Unlock it locally to continue.");
+    }, FAST_WALLET_IDLE_MS);
+  }
+
+  function cachedFastWalletSecret(chain, address) {
+    if (!fastWalletSession) return null;
+    if (Date.now() - fastWalletSession.lastUsedAt > FAST_WALLET_IDLE_MS) {
+      clearFastWalletSession();
+      return null;
+    }
+    const sameChain = fastWalletSession.chain === chain;
+    const sameAddress = chain === "solana"
+      ? fastWalletSession.address === address
+      : fastWalletSession.address.toLowerCase() === String(address || "").toLowerCase();
+    if (!sameChain || !sameAddress) return null;
+    fastWalletSession.lastUsedAt = Date.now();
+    scheduleFastWalletLock();
+    return fastWalletSession.secret;
+  }
+
+  function loadBrowserModule(src, globalName) {
+    if (window[globalName]) return Promise.resolve(window[globalName]);
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = () => window[globalName] ? resolve(window[globalName]) : reject(new Error(`${globalName} did not initialize`));
+      script.onerror = () => reject(new Error(`${globalName} could not be loaded`));
+      document.head.appendChild(script);
+    });
+  }
+
+  function ensureLocalWalletModule() {
+    localWalletModulePromise ||= loadBrowserModule("assets/local-wallet.js", "ConiLocalWallet").catch((error) => { localWalletModulePromise = null; throw error; });
+    return localWalletModulePromise;
+  }
+
+  function ensureSolanaFundingModule() {
+    solanaFundingModulePromise ||= loadBrowserModule("assets/solana-funding.js", "ConiSolana").catch((error) => { solanaFundingModulePromise = null; throw error; });
+    return solanaFundingModulePromise;
   }
 
   function legacyEvmProviders() {
@@ -124,32 +211,66 @@
     } catch { /* ignore invalid local state */ }
   }
 
-  async function authenticateWallet(chain, address, sign) {
-    const challengeResponse = await fetch(`${config.apiBaseUrl}/api/auth/challenge`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ chain, address, origin: window.location.origin }) });
+  async function authenticateWallet(chain, address, sign, walletMode) {
+    // The server authenticates the browser Origin header and the wallet
+    // signature. walletMode is only a custody-mode preference; it never
+    // authorizes a transfer and is applied server-side after verification.
+    const challengeResponse = await fetch(`${config.apiBaseUrl}/api/auth/challenge`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ chain, address }) });
     const challenge = await challengeResponse.json();
     if (!challengeResponse.ok) throw new Error(challenge.error || "Could not create wallet challenge");
     message("Approve the free sign-in message. It cannot move funds…");
     const signature = await sign(challenge.message);
-    const verifyResponse = await fetch(`${config.apiBaseUrl}/api/auth/verify`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ challengeId: challenge.challengeId, address, signature }) });
+    const verifyResponse = await fetch(`${config.apiBaseUrl}/api/auth/verify`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ challengeId: challenge.challengeId, address, signature, walletMode }) });
     const verified = await verifyResponse.json();
     if (!verifyResponse.ok || !verified.authenticated) throw new Error(verified.error || "Wallet ownership could not be verified");
     return verified.wallet;
   }
 
+  async function provisionLocalBotWallet() {
+    const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/provision`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ mode: "internal-bot" }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "The internal bot-wallet record could not be attached");
+    preferredBotMode = "internal-bot";
+    localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+    return result;
+  }
+
   async function authenticateLocalWallet(descriptor) {
+    await ensureLocalWalletModule();
     const wallet = await authenticateWallet(
       descriptor.chain,
       descriptor.address,
       (messageText) => window.ConiLocalWallet.signMessage(descriptor.chain, descriptor.secret, messageText),
+      "internal-bot",
     );
-    preferredBotMode = "external-bot";
-    localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+    cacheFastWalletSession(descriptor);
+    let internalBotAttached = false;
+    try {
+      await provisionLocalBotWallet();
+      internalBotAttached = true;
+    } catch (error) {
+      preferredBotMode = "external-bot";
+      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      message(`Wallet authenticated, but internal bot-wallet setup is waiting: ${error.message}`, "error");
+    }
+    let localBalance = "Local wallet";
+    if (descriptor.chain !== "solana") {
+      try {
+        const raw = await localRpc(descriptor.chain, "eth_getBalance", [descriptor.address, "latest"]);
+        localBalance = `${(Number(BigInt(raw)) / 1e18).toFixed(5)} native`;
+      } catch { /* the wallet remains usable when the private relay is unavailable */ }
+    }
     if (descriptor.chain === "solana") {
       state.solana = {
         provider: null,
         address: descriptor.address,
         chain: "solana",
-        balance: "Local wallet",
+        balance: localBalance,
         providerName: "Coni local wallet",
         authenticated: true,
         local: true,
@@ -162,7 +283,7 @@
         chain: descriptor.chain,
         chainId,
         chainName: chainNames[chainId] || descriptor.chain,
-        balance: "Local wallet",
+        balance: localBalance,
         providerName: "Coni local wallet",
         authenticated: true,
         local: true,
@@ -172,7 +293,7 @@
     renderConnections();
     loadFundingAssets(descriptor.chain);
     loadBotWallet();
-    return wallet;
+    return { ...wallet, internalBotAttached };
   }
 
   async function loadTokenLogo() {
@@ -256,7 +377,7 @@
       const balance = await readEvmBalance(provider, address);
       const chain = Object.entries(config.wallets.evmChains).find(([, id]) => id === chainId)?.[0];
       if (!chain) throw new Error("Unsupported EVM chain");
-      await authenticateWallet(chain, address, (messageText) => provider.request({ method: "personal_sign", params: [messageText, address] }));
+      await authenticateWallet(chain, address, (messageText) => provider.request({ method: "personal_sign", params: [messageText, address] }), "external-bot");
       preferredBotMode = "external-bot";
       localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
       state.evm = { provider, address, chain, chainId, chainName: chainNames[chainId] || `Chain ${chainId}`, balance, providerName: providerLabel(provider), authenticated: true };
@@ -265,7 +386,14 @@
       message(`${state.evm.chainName} wallet connected.`, "success");
       loadFundingAssets(chain);
       loadBotWallet();
-      provider.on?.("accountsChanged", () => connectEvm());
+      provider.on?.("accountsChanged", async () => {
+        const previous = state.evm;
+        state.evm = null;
+        saveConnections();
+        renderConnections();
+        await logoutWalletIdentity(previous);
+        await connectEvm();
+      });
       provider.on?.("chainChanged", () => connectEvm());
     } catch (error) {
       message(error?.message || "The EVM wallet connection was cancelled.", "error");
@@ -276,15 +404,14 @@
     if (!address || !provider.signMessage) throw new Error("This Solana wallet does not expose off-chain message signing");
     let balance = "Connected";
     try {
-      const rpc = await fetch("https://api.mainnet-beta.solana.com", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getBalance", params: [address] }) });
-      const json = await rpc.json();
-      balance = `${((json.result?.value || 0) / 1e9).toFixed(5)} SOL`;
-    } catch { /* balance stays connected when the public RPC is unavailable */ }
+      const result = await localRpc("solana", "getBalance", [address, { commitment: "confirmed" }]);
+      balance = `${(Number(result?.value || 0) / 1e9).toFixed(5)} SOL`;
+    } catch { /* balance stays connected when the private relay is unavailable */ }
     await authenticateWallet("solana", address, async (messageText) => {
       const signed = await provider.signMessage(new TextEncoder().encode(messageText), "utf8");
       const bytes = signed.signature || signed;
       return btoa(String.fromCharCode(...bytes));
-    });
+    }, "external-bot");
     preferredBotMode = "external-bot";
     localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
     state.solana = { provider, address, chain: "solana", balance, providerName: providerLabel(provider, true), authenticated: true };
@@ -292,6 +419,18 @@
     renderConnections();
     loadFundingAssets("solana");
     loadBotWallet();
+  }
+
+  async function logoutWalletIdentity(identity) {
+    if (!identity?.chain || !identity?.address) return;
+    try {
+      await fetch(`${config.apiBaseUrl}/api/auth/logout-identity`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ chain: identity.chain, address: identity.address }),
+      });
+    } catch { /* the next wallet signature cannot authorize the removed UI state */ }
   }
 
   async function handleSolanaAccountChanged(provider, publicKey) {
@@ -304,9 +443,7 @@
     renderConnections();
     $("#bot-wallet-state").textContent = "CONNECT FIRST";
     $("#bot-wallet-content").querySelector("p").textContent = "Reconnect and sign in with the active Solana account to view its bot wallet.";
-    try {
-      await fetch(`${config.apiBaseUrl}/api/auth/logout`, { method: "POST", credentials: "include" });
-    } catch { /* the new signature still cannot authenticate the old identity */ }
+    await logoutWalletIdentity({ chain: "solana", address: state.solana?.address || address });
     if (!address) {
       message("Solana wallet disconnected.", "success");
       return;
@@ -367,18 +504,21 @@
     const fundingAddress = requestedChain === "solana" ? state.solana?.address : state.evm?.address;
     if (!requestedChain || !fundingAddress || (requestedChain === "solana" ? state.solana?.restored : state.evm?.restored)) { $("#funding-status").textContent = "Connect the wallet for the selected bot network before preparing funding."; return; }
     const sourceWallet = requestedChain === "solana" ? state.solana : state.evm;
-    if (sourceWallet?.local && !sourceWallet.provider) { $("#funding-status").textContent = "This local wallet is authenticated, but transaction approval requires reconnecting a wallet provider for the selected network."; return; }
-    if (!/^\d+(\.\d{1,18})?$/.test(amount) || Number(amount) <= 0) { $("#funding-status").textContent = "Enter a positive amount with no more than 18 decimal places."; return; }
+    const assetDecimals = Number(fundingAssets.get(asset)?.decimals);
+    const decimalLimit = Number.isInteger(assetDecimals) && assetDecimals >= 0 && assetDecimals <= 36 ? assetDecimals : 18;
+    const amountPattern = new RegExp(`^\\d+(\\.\\d{1,${decimalLimit}})?$`);
+    if (!amountPattern.test(amount) || Number(amount) <= 0) { $("#funding-status").textContent = `Enter a positive amount with no more than ${decimalLimit} decimal places.`; return; }
     $("#funding-status").textContent = "Asking the secure backend for a whitelisted funding intent…";
     try {
       const response = await fetch(`${config.apiBaseUrl}/api/funding/intent`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ asset, amount, chain: requestedChain, wallet: fundingAddress, botWalletId: botFundingMode ? activeBotWallet?.id : null }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "Funding intent rejected");
       activeIntent = result;
-      $("#funding-status").textContent = `${result.botWalletId ? "Bot top-up: " : ""}Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}. Review the full destination in your wallet before approving.`;
+      const feeCopy = result.feeAmountBaseUnits && result.feeAmountBaseUnits !== "0" ? ` · fee ${result.feeAmountBaseUnits} base units · net credit ${result.netAmountBaseUnits}` : " · fee 0 base units";
+      $("#funding-status").textContent = `${result.botWalletId ? "Bot top-up: " : ""}Send exactly ${result.amount} ${result.asset} to ${short(result.destination)}${feeCopy}. Review the full destination in your wallet before approving.`;
       $("#approve-funding").hidden = result.chain === "solana"
-        ? !(state.solana?.provider && !state.solana?.restored)
-        : !(state.evm?.provider && !state.evm?.restored);
+        ? !(state.solana?.local || (state.solana?.provider && !state.solana?.restored))
+        : !(state.evm?.local || (state.evm?.provider && !state.evm?.restored));
       $("#approve-funding").textContent = result.chain === "solana" ? "Approve in connected Solana wallet ↗" : "Approve in connected EVM wallet ↗";
       $("#funding-hash-row").hidden = false;
       $("#claim-funding").hidden = false;
@@ -412,7 +552,10 @@
         const result = await response.json();
         const latest = result.observations?.[0];
         if (result.state === "credited") {
-          $("#funding-status").textContent = "Funding confirmed and credited to the ledger.";
+          $("#funding-status").textContent = "Funding confirmed and credited to the ledger. Rechecking bot reserve and automation state…";
+          botFundingMode = false;
+          await loadBotWallet(activeBotWallet?.id || null);
+          $("#funding-status").textContent = "Funding confirmed. The bot will scan after the reserve, policy, fresh-quote, and signer gates pass.";
           return;
         }
         if (latest?.state === "rejected") {
@@ -428,25 +571,128 @@
     fundingPollTimer = setTimeout(watchFundingStatus, 5000);
   }
 
+  async function localRpc(chain, method, params = []) {
+    const response = await fetch(`${config.apiBaseUrl}/api/rpc/${encodeURIComponent(chain)}`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: crypto.randomUUID(), method, params }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.error) throw new Error(payload.error?.message || "Private Coni RPC request failed");
+    return payload.result;
+  }
+
+  async function unlockLocalEvm() {
+    await ensureLocalWalletModule();
+    const vault = readLocalVault();
+    if (!vault || vault.chain === "solana") throw new Error("No encrypted EVM wallet is available in this browser");
+    const cached = cachedFastWalletSecret(vault.chain, state.evm?.address || vault.address);
+    if (cached) return { secret: cached, chain: vault.chain };
+    const password = $("#existing-wallet-password")?.value || window.prompt("Enter your fast-wallet password to approve this transaction. It will not be stored or sent to Coni.");
+    if (!password) throw new Error("Local wallet unlock cancelled");
+    const secret = await decryptLocalSecret(vault, password);
+    const descriptor = window.ConiLocalWallet.describe(vault.chain, secret);
+    if (!state.evm?.address || descriptor.address.toLowerCase() !== state.evm.address.toLowerCase()) {
+      throw new Error("The encrypted local wallet does not match the authenticated wallet");
+    }
+    cacheFastWalletSession(descriptor);
+    if ($("#existing-wallet-password")) $("#existing-wallet-password").value = "";
+    return { secret, chain: vault.chain };
+  }
+
+  async function unlockLocalSolana() {
+    await ensureLocalWalletModule();
+    const vault = readLocalVault();
+    if (!vault || vault.chain !== "solana") throw new Error("No encrypted Solana wallet is available in this browser");
+    const cached = cachedFastWalletSecret("solana", state.solana?.address || vault.address);
+    if (cached) return { secret: cached };
+    const password = $("#existing-wallet-password")?.value || window.prompt("Enter your fast-wallet password to approve this transaction. It will not be stored or sent to Coni.");
+    if (!password) throw new Error("Local wallet unlock cancelled");
+    const secret = await decryptLocalSecret(vault, password);
+    const descriptor = window.ConiLocalWallet.describe("solana", secret);
+    if (!state.solana?.address || descriptor.address !== state.solana.address) throw new Error("The encrypted local wallet does not match the authenticated wallet");
+    cacheFastWalletSession(descriptor);
+    if ($("#existing-wallet-password")) $("#existing-wallet-password").value = "";
+    return { secret };
+  }
+
+  async function sendLocalEvmFunding(intent) {
+    await ensureLocalWalletModule();
+    if (!window.ConiLocalWallet?.signEvmTransaction) throw new Error("Local EVM signer is unavailable; refresh the page");
+    const unlocked = await unlockLocalEvm();
+    let secret = unlocked.secret;
+    try {
+      const chainIdHex = await localRpc(intent.chain, "eth_chainId");
+      const chainId = Number.parseInt(chainIdHex, 16);
+      const expectedChainId = config.wallets.evmChains[intent.chain];
+      if (!Number.isInteger(chainId) || (expectedChainId && chainId !== expectedChainId)) throw new Error("Private RPC returned the wrong chain identity");
+      const native = intent.asset === (intent.chain === "bsc" ? "BNB" : "ETH");
+      let transaction;
+      if (native) {
+        transaction = { from: state.evm.address, to: intent.destination, value: `0x${BigInt(intent.amountBaseUnits).toString(16)}`, data: "0x" };
+      } else {
+        const tokenAddress = String(intent.tokenAddress || "");
+        if (!/^0x[a-fA-F0-9]{40}$/.test(tokenAddress)) throw new Error("The server did not provide a verified token contract");
+        const recipient = intent.destination.slice(2).toLowerCase().padStart(64, "0");
+        const amount = BigInt(intent.amountBaseUnits).toString(16).padStart(64, "0");
+        transaction = { from: state.evm.address, to: tokenAddress, value: "0x0", data: `0xa9059cbb${recipient}${amount}` };
+      }
+      const [nonceHex, gasPriceHex, gasHex] = await Promise.all([
+        localRpc(intent.chain, "eth_getTransactionCount", [state.evm.address, "pending"]),
+        localRpc(intent.chain, "eth_gasPrice"),
+        localRpc(intent.chain, "eth_estimateGas", [transaction]),
+      ]);
+      const raw = await window.ConiLocalWallet.signEvmTransaction(intent.chain, secret, {
+        type: "legacy",
+        chainId,
+        nonce: BigInt(nonceHex),
+        gasPrice: BigInt(gasPriceHex),
+        gas: BigInt(gasHex),
+        to: transaction.to,
+        value: BigInt(transaction.value),
+        data: transaction.data,
+      });
+      return localRpc(intent.chain, "eth_sendRawTransaction", [raw]);
+    } finally {
+      secret = "";
+    }
+  }
+
   async function approveFunding() {
     if (!activeIntent) throw new Error("Create a funding intent before approving");
     if (activeIntent.chain === "solana") {
-      if (!state.solana?.provider || state.solana.restored) throw new Error("Reconnect the Solana wallet before approving");
+      let secret = "";
+      if (state.solana?.local) secret = (await unlockLocalSolana()).secret;
+      if (!secret && (!state.solana?.provider || state.solana.restored)) throw new Error("Reconnect the Solana wallet before approving");
+      await ensureSolanaFundingModule();
       if (!window.ConiSolana?.sendFunding) throw new Error("The Solana transaction module is unavailable; refresh the page and try again");
       $("#funding-status").textContent = "Reviewing the exact Solana destination, mint, and amount in your wallet…";
-      const result = await window.ConiSolana.sendFunding({
-        provider: state.solana.provider,
-        rpcUrl: config.solanaRpcUrl,
-        from: state.solana.address,
-        destination: activeIntent.destination,
-        amountBaseUnits: activeIntent.amountBaseUnits,
-        asset: activeIntent.asset,
-        tokenAddress: activeIntent.tokenAddress,
-        tokenProgram: activeIntent.tokenProgram,
-        decimals: activeIntent.decimals,
-      });
-      $("#funding-tx-hash").value = result.signature;
-      await claimFunding(result.signature, result.eventIndex);
+      try {
+        const result = await window.ConiSolana.sendFunding({
+          provider: secret ? null : state.solana.provider,
+          secret,
+          rpcUrl: config.solanaRpcUrl,
+          from: state.solana.address,
+          destination: activeIntent.destination,
+          amountBaseUnits: activeIntent.amountBaseUnits,
+          asset: activeIntent.asset,
+          tokenAddress: activeIntent.tokenAddress,
+          tokenProgram: activeIntent.tokenProgram,
+          decimals: activeIntent.decimals,
+        });
+        $("#funding-tx-hash").value = result.signature;
+        await claimFunding(result.signature, result.eventIndex);
+      } finally {
+        secret = "";
+      }
+      return;
+    }
+    if (state.evm?.local) {
+      $("#funding-status").textContent = "Unlocking the local wallet. Review the exact destination and amount before signing…";
+      const txHash = await sendLocalEvmFunding(activeIntent);
+      $("#funding-tx-hash").value = txHash;
+      await claimFunding(txHash);
       return;
     }
     if (!state.evm?.provider || state.evm.restored) throw new Error("Reconnect the EVM wallet before approving");
@@ -482,6 +728,23 @@
     return String(value ?? "—").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
   }
 
+  function formatBaseUnits(value, decimals = 0) {
+    const raw = String(value ?? "");
+    if (!/^\d+$/.test(raw)) return "—";
+    const scale = Number(decimals);
+    if (!Number.isInteger(scale) || scale <= 0) return raw;
+    const padded = raw.padStart(scale + 1, "0");
+    const whole = padded.slice(0, -scale) || "0";
+    const fraction = padded.slice(-scale).replace(/0+$/, "").slice(0, 8);
+    return fraction ? `${whole}.${fraction}` : whole;
+  }
+
+  function applyFundingAssets(chain, assets) {
+    fundingAssets.clear();
+    (assets || []).forEach((item) => fundingAssets.set(String(item.asset).toUpperCase(), item));
+    renderFundingAssetOptions(chain);
+  }
+
   function renderFundingAssetOptions(chain) {
     const native = chain === "solana" ? "SOL" : chain === "bsc" ? "BNB" : "ETH";
     const fundingSelect = $("#funding-asset");
@@ -513,22 +776,44 @@
   }
 
   async function loadFundingAssets(chain) {
-    fundingAssets.clear();
-    renderFundingAssetOptions(chain);
     if (!chain) return;
+    const cached = fundingAssetCache.get(chain);
+    if (cached) {
+      applyFundingAssets(chain, cached);
+      return;
+    }
+    const pending = fundingAssetRequests.get(chain);
+    if (pending) {
+      await pending;
+      return;
+    }
+    const native = chain === "solana" ? "SOL" : chain === "bsc" ? "BNB" : "ETH";
+    applyFundingAssets(chain, [{ asset: native, decimals: native === "SOL" ? 9 : 18, native: true }]);
+    const request = (async () => {
+      try {
+        const response = await fetch(`${config.apiBaseUrl}/api/funding/assets?chain=${encodeURIComponent(chain)}`, { credentials: "include", cache: "no-store" });
+        if (!response.ok) return;
+        const result = await response.json();
+        const assets = Array.isArray(result.assets) ? result.assets : [];
+        if (assets.length) fundingAssetCache.set(chain, assets);
+        const isCurrentChain = activeBotWallet?.chain === chain || (!activeBotWallet && (state.solana?.chain === chain || state.evm?.chain === chain));
+        if (isCurrentChain) applyFundingAssets(chain, assets.length ? assets : [{ asset: native, decimals: native === "SOL" ? 9 : 18, native: true }]);
+      } catch { /* native asset remains available while the registry is unavailable */ }
+    })();
+    fundingAssetRequests.set(chain, request);
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/funding/assets?chain=${encodeURIComponent(chain)}`, { credentials: "include", cache: "no-store" });
-      if (!response.ok) return;
-      const result = await response.json();
-      (result.assets || []).forEach((item) => fundingAssets.set(String(item.asset).toUpperCase(), item));
-      renderFundingAssetOptions(chain);
-    } catch { /* native asset remains available while the registry is unavailable */ }
+      await request;
+    } finally {
+      fundingAssetRequests.delete(chain);
+    }
   }
 
   function botWalletChoices() {
-    const wallets = botWalletSnapshot?.wallets || [];
-    const preferred = wallets.filter((item) => item.mode === preferredBotMode);
-    return preferred.length ? preferred : wallets.filter((item) => item.mode === "external-bot");
+    // The API returns one active custody mode per authenticated identity. Do
+    // not apply one browser-wide mode filter: an EVM identity and a Solana
+    // identity may legitimately have different selected modes in the same
+    // signed session.
+    return botWalletSnapshot?.wallets || [];
   }
 
   function renderBotWalletChoices() {
@@ -549,13 +834,56 @@
   function renderBotWalletSummary() {
     const wallet = activeBotWallet;
     if (!wallet) return;
+    const botTopupButton = $("#bot-topup");
+    const botWithdrawButton = $("#bot-withdraw");
+    const botTransferReady = wallet.status === "active"
+      && Boolean(wallet.address)
+      && wallet.custody === "audited-signer";
+    [botTopupButton, botWithdrawButton].forEach((button) => {
+      if (!button) return;
+      button.disabled = !botTransferReady;
+      button.title = botTransferReady
+        ? ""
+        : "This bot wallet must receive an audited signer address before transfers are enabled.";
+    });
     loadFundingAssets(wallet.chain);
-    $("#internal-wallet-toggle").hidden = wallet.mode !== "internal-bot";
-    $("#bot-wallet-state").textContent = wallet.status === "active" ? "ACTIVE" : "GATED";
-    const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(item.amountBaseUnits)}</span>`).join(" ") || "No verified balance";
-    $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p></div>`;
+    const internalWallet = wallet.mode === "internal-bot";
+    $("#internal-wallet-toggle").hidden = !internalWallet;
+    const surface = internalWallet && document.body.dataset.walletSurface === "normal" ? "normal" : "bot";
+    if (!internalWallet) document.body.dataset.walletSurface = "bot";
+    const isBotSurface = surface === "bot";
+    $("#bot-wallet-state").textContent = isBotSurface ? (wallet.status === "active" ? "ACTIVE" : "GATED") : "NORMAL VIEW";
+    $(".bot-wallet-actions")?.toggleAttribute("hidden", !isBotSurface);
+    $("#bot-withdraw-form").hidden = true;
+    const balances = (wallet.balances || []).map((item) => `<span class="network-pill">${esc(item.asset)} ${esc(formatBaseUnits(item.amountBaseUnits, item.decimals))}</span>`).join(" ") || "No verified balance";
+    const normalState = wallet.chain === "solana" ? state.solana : state.evm;
+    if (!isBotSurface) {
+      const normalAddress = wallet.sourceAddress || normalState?.address;
+      const normalBalance = normalState?.balance || "Balance refresh requires a connected provider";
+      $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>◉</span></div><div><strong>Normal wallet</strong><p>${normalAddress ? `${esc(short(normalAddress))} · ${esc(wallet.chain)} · ${esc(normalBalance)}` : "Connect or unlock this local wallet to read its balance."}</p></div>`;
+      $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>USER WALLET</strong><small>This is the funding source. Trading activity and PNL remain isolated in the attached bot wallet.</small></div>`;
+      return;
+    }
+    const automation = wallet.automation || {};
+    const automationLabels = {
+      "awaiting-signer": "Awaiting signer attestation",
+      "global-paused": "Paused by global safety control",
+      "user-paused": "Paused in this wallet’s settings",
+      "awaiting-reserve-policy": "Awaiting native reserve policy",
+      "awaiting-funding": "Funded balance required before scanning",
+      "ready-to-scan": "Ready for automatic opportunity scanning",
+    };
+    const automationLabel = automationLabels[automation.state] || "Planner status unavailable";
+    const automationNote = automation.state === "ready-to-scan"
+      ? "The worker will re-quote eligible Pangea routes; the signer remains the final execution gate."
+      : automation.state === "awaiting-funding"
+        ? `Top up at least ${formatBaseUnits(automation.requiredNativeReserveBaseUnits, wallet.chain === "solana" ? 9 : 18)} ${automation.nativeAsset || "native"} to enter the scan queue.`
+        : automationLabel;
+    $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>${wallet.status === "active" ? "Bot wallet ready" : "Bot wallet record attached"}</strong><p>${wallet.address ? `${esc(short(wallet.address))} · ${esc(wallet.chain)} · ${balances}` : "Awaiting the audited signer/MPC provisioner. No address or private key has been fabricated."}</p><small class="bot-automation-state">${esc(automationLabel)}</small><small>${esc(automationNote)}</small></div>`;
     const tokens = (botWalletSnapshot?.tradedTokens || []).map(tokenChip).join(" ") || "No completed token trades";
-    $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(botWalletSnapshot?.pnl?.realizedUsd || "0")}</b><small>${esc(botWalletSnapshot?.pnl?.settledTrades || 0)} settled trades · ${esc(botWalletSnapshot?.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (botWalletSnapshot?.history || []).slice(0, 8).map((item) => `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)} · ${esc(item.createdAt)}</small></div><b>${item.realizedProfitUsd ? `$${esc(item.realizedProfitUsd)}` : "—"}</b></div>`).join("");
+    const pnl = botWalletSnapshot?.pnl || {};
+    const compounding = botWalletSnapshot?.compounding || {};
+        $("#bot-wallet-history").innerHTML = `<div class="bot-pnl-strip"><strong>PNL</strong><b>$${esc(pnl.realizedUsd || "0")}</b><div class="bot-pnl-grid"><span><small>Expected</small><b>$${esc(pnl.expectedUsd || "0")}</b></span><span><small>Compounded</small><b>$${esc(compounding.allocatedProfitUsd || "0")}</b></span><span><small>Payable</small><b>$${esc(compounding.payoutProfitUsd || "0")}</b></span></div><small>${esc(pnl.settledTrades || 0)} settled trades · ${esc(botWalletSnapshot?.tradedTokens?.length || 0)} Pangea tokens tracked</small><div class="bot-token-list">${tokens}</div></div>` + (botWalletSnapshot?.history || []).slice(0, 8).map((item) => { const route = item.buyChain && item.sellChain ? ` · ${esc(item.buyChain)} → ${esc(item.sellChain)}` : ""; const result = item.realizedProfitUsd && item.realizedProfitUsd !== "0" ? `$${esc(item.realizedProfitUsd)}` : item.expectedProfitUsd && item.expectedProfitUsd !== "0" ? `exp $${esc(item.expectedProfitUsd)}` : "—"; const fee = item.fee ? ` · fee ${esc(item.fee.amountBaseUnits)} ${esc(item.fee.asset)} (${esc(item.fee.feeBps)} bps)` : ""; return `<div class="activity-item"><span class="activity-kind ${item.kind === "trade" ? "trade" : "bridge"}">${esc(String(item.kind).toUpperCase())}</span><div><strong>${esc(item.slug || item.asset || "Bot wallet")}</strong><small>${esc(item.state)}${route}${fee} · ${esc(item.createdAt)}</small></div><b>${result}</b></div>`; }).join("");
     wireTokenLogoFallbacks();
   }
 
@@ -625,19 +953,25 @@
 
   async function encryptLocalSecret(secret, password, chain, address = "") {
     const encoder = new TextEncoder();
+    const normalizedChain = chain === "evm" ? "base" : chain;
+    const normalizedAddress = String(address || "");
+    const kdfIterations = 310000;
+    const aad = `coni-fast-wallet:v2:${normalizedChain}:${normalizedAddress}`;
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
-    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoder.encode(secret));
+    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: kdfIterations, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+    const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: encoder.encode(aad) }, key, encoder.encode(secret));
     const encode = (bytes) => btoa(String.fromCharCode(...bytes));
-    return { version: 1, chain, address, algorithm: "PBKDF2-AES-GCM", salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
+    return { version: 2, walletType: "fast", chain: normalizedChain, address: normalizedAddress, algorithm: "PBKDF2-AES-GCM", kdfIterations, aad, salt: encode(salt), iv: encode(iv), ciphertext: encode(new Uint8Array(ciphertext)), createdAt: new Date().toISOString() };
   }
 
   function readLocalVault() {
     try {
-      const vault = JSON.parse(localStorage.getItem("coni.internal.vault.v1") || "null");
-      if (!vault || vault.version !== 1 || !["ethereum", "base", "robinhood", "bsc", "evm", "solana"].includes(vault.chain) || vault.algorithm !== "PBKDF2-AES-GCM") return null;
+      const raw = localStorage.getItem(FAST_WALLET_STORAGE_KEY) || localStorage.getItem(LEGACY_LOCAL_VAULT_KEY);
+      const vault = JSON.parse(raw || "null");
+      if (!vault || ![1, 2].includes(vault.version) || !["ethereum", "base", "robinhood", "bsc", "evm", "solana"].includes(vault.chain) || vault.algorithm !== "PBKDF2-AES-GCM") return null;
+      if (vault.version === 2 && (vault.walletType !== "fast" || !Number.isInteger(vault.kdfIterations) || vault.kdfIterations < 250000 || typeof vault.aad !== "string")) return null;
       if (![vault.salt, vault.iv, vault.ciphertext].every((value) => typeof value === "string" && value.length > 0)) return null;
       return vault;
     } catch {
@@ -649,8 +983,11 @@
     const decode = (value) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
     const encoder = new TextEncoder();
     const material = await crypto.subtle.importKey("raw", encoder.encode(password), "PBKDF2", false, ["deriveKey"]);
-    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: decode(vault.salt), iterations: 250000, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
-    const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decode(vault.iv) }, key, decode(vault.ciphertext));
+    const iterations = vault.version === 2 ? vault.kdfIterations : 250000;
+    const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: decode(vault.salt), iterations, hash: "SHA-256" }, material, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+    const params = { name: "AES-GCM", iv: decode(vault.iv) };
+    if (vault.version === 2) params.additionalData = encoder.encode(vault.aad);
+    const plaintext = await crypto.subtle.decrypt(params, key, decode(vault.ciphertext));
     return new TextDecoder().decode(plaintext);
   }
 
@@ -662,13 +999,97 @@
     if (!tools || !verify || !status) return;
     tools.hidden = !vault;
     verify.hidden = !vault;
+    $("#unlock-fast-wallet")?.toggleAttribute("hidden", !vault || Boolean(fastWalletSession));
+    $("#lock-fast-wallet")?.toggleAttribute("hidden", !fastWalletSession);
     if (!vault) {
       status.textContent = "No encrypted local backup stored in this browser.";
       return;
     }
     $("#existing-wallet-chain").value = vault.chain === "evm" ? "base" : vault.chain;
     const created = vault.createdAt ? new Date(vault.createdAt).toLocaleString() : "unknown time";
-    status.textContent = `Encrypted ${vault.chain === "solana" ? "Solana" : vault.chain.toUpperCase()} backup present${vault.address ? ` · ${short(vault.address)}` : ""} · created ${created}`;
+    const stateLabel = fastWalletSession ? "UNLOCKED IN MEMORY" : "LOCKED";
+    status.textContent = `FAST WALLET ${stateLabel} · encrypted ${vault.chain === "solana" ? "Solana" : vault.chain.toUpperCase()} backup${vault.address ? ` · ${short(vault.address)}` : ""} · created ${created}`;
+  }
+
+  async function unlockFastWallet() {
+    await ensureLocalWalletModule();
+    const vault = readLocalVault();
+    if (!vault) throw new Error("No encrypted fast-wallet backup is available in this browser");
+    const password = $("#existing-wallet-password")?.value;
+    if (!password || password.length < 12) throw new Error("Enter the fast-wallet password first. It is used only in this browser.");
+    let secret = "";
+    try {
+      secret = await decryptLocalSecret(vault, password);
+      const descriptor = window.ConiLocalWallet.describe(vault.chain, secret);
+      if (vault.address && (vault.chain === "solana" ? descriptor.address !== vault.address : descriptor.address.toLowerCase() !== vault.address.toLowerCase())) throw new Error("The encrypted backup address does not match its wallet secret");
+      await authenticateLocalWallet(descriptor);
+      cacheFastWalletSession(descriptor);
+      $("#vault-action-status").textContent = `Fast wallet unlocked and authenticated as ${short(descriptor.address)}. The key remains in memory only and will auto-lock after inactivity.`;
+      renderLocalVaultTools();
+    } finally {
+      secret = "";
+      if ($("#existing-wallet-password")) $("#existing-wallet-password").value = "";
+    }
+  }
+
+  function lockFastWallet() {
+    clearFastWalletSession();
+    $("#vault-action-status").textContent = "Fast wallet locked. Its encrypted backup remains in this browser; no key was sent to Coni.";
+  }
+
+  function ensureRecoveryPanel() {
+    const parent = $("#new-wallet-panel");
+    if (!parent || $("#local-recovery-panel")) return;
+    const panel = document.createElement("div");
+    panel.id = "local-recovery-panel";
+    panel.className = "modal-note recovery-panel";
+    panel.hidden = true;
+    panel.innerHTML = `<span>!</span><div><strong>Save this recovery secret offline</strong><p id="local-recovery-copy">It is shown only in this browser. Never send it to Coni or paste it into a website.</p><button class="ghost-button" id="reveal-local-recovery">Reveal recovery secret</button><textarea id="local-recovery-secret" class="recovery-secret" rows="3" readonly hidden spellcheck="false"></textarea><div class="recovery-actions" hidden><button class="ghost-button" id="copy-local-recovery">Copy</button><button class="ghost-button" id="hide-local-recovery">Hide and clear</button></div></div>`;
+    parent.appendChild(panel);
+    $("#reveal-local-recovery").addEventListener("click", () => {
+      if (!pendingRecoverySecret) return;
+      const field = $("#local-recovery-secret");
+      field.value = pendingRecoverySecret.secret;
+      field.hidden = false;
+      $(".recovery-actions").hidden = false;
+      $("#reveal-local-recovery").hidden = true;
+    });
+    $("#copy-local-recovery").addEventListener("click", async () => {
+      const value = $("#local-recovery-secret").value;
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+        $("#local-recovery-copy").textContent = "Copied. Store it offline, then clear this panel.";
+      } catch {
+        $("#local-recovery-copy").textContent = "Clipboard access was denied. Select the secret and store it offline.";
+      }
+    });
+    $("#hide-local-recovery").addEventListener("click", () => {
+      $("#local-recovery-secret").value = "";
+      $("#local-recovery-secret").hidden = true;
+      $(".recovery-actions").hidden = true;
+      $("#reveal-local-recovery").hidden = false;
+      $("#local-recovery-panel").hidden = true;
+      pendingRecoverySecret = null;
+    });
+  }
+
+  function showRecoverySecret(chain, secret) {
+    ensureRecoveryPanel();
+    pendingRecoverySecret = { chain, secret };
+    $("#local-recovery-panel").hidden = false;
+    $("#local-recovery-copy").textContent = `This ${chain === "solana" ? "Solana secret" : "EVM private key"} is shown only in this browser. Never send it to Coni or paste it into a website.`;
+  }
+
+  function clearBrowserSecrets() {
+    clearFastWalletSession();
+    pendingRecoverySecret = null;
+    ["#local-recovery-secret", "#existing-private-key", "#existing-wallet-password", "#new-wallet-password", "#new-wallet-password-confirm"].forEach((selector) => {
+      const field = $(selector);
+      if (field) field.value = "";
+    });
+    const recoveryPanel = $("#local-recovery-panel");
+    if (recoveryPanel) recoveryPanel.hidden = true;
   }
 
   async function verifyLocalVault() {
@@ -700,7 +1121,7 @@
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `coni-encrypted-wallet-backup-${vault.chain}.json`;
+    anchor.download = `coni-fast-wallet-backup-${vault.chain}.json`;
     anchor.click();
     URL.revokeObjectURL(url);
     $("#local-vault-status").textContent = "Encrypted backup exported. It contains ciphertext only; protect the file and password separately.";
@@ -709,12 +1130,15 @@
   function deleteLocalVault() {
     if (!readLocalVault()) { renderLocalVaultTools(); return; }
     if (!window.confirm("Delete this encrypted local backup from this browser? This does not affect any on-chain wallet or bot wallet.")) return;
-    localStorage.removeItem("coni.internal.vault.v1");
+    localStorage.removeItem(FAST_WALLET_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_LOCAL_VAULT_KEY);
+    clearFastWalletSession();
     renderLocalVaultTools();
     $("#local-vault-status").textContent = "Encrypted local backup deleted from this browser.";
   }
 
   async function importLocalWallet() {
+    await ensureLocalWalletModule();
     const chain = $("#existing-wallet-chain").value;
     const privateKey = $("#existing-private-key").value.trim();
     const password = $("#existing-wallet-password").value;
@@ -731,10 +1155,11 @@
     if (readLocalVault() && !window.confirm("Replace the existing encrypted local backup? The old backup will be overwritten.")) return;
     let secret = descriptor.secret;
     const vault = await encryptLocalSecret(secret, password, chain, descriptor.address);
-    localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
+    localStorage.setItem(FAST_WALLET_STORAGE_KEY, JSON.stringify(vault));
     try {
-      await authenticateLocalWallet(descriptor);
-      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(descriptor.address)}. Connect a wallet provider before approving transactions.`;
+      const session = await authenticateLocalWallet(descriptor);
+      const botStatus = session.internalBotAttached ? " Internal bot-wallet records are attached and awaiting signer provisioning." : " Bot-wallet attachment is waiting for the backend; retry the internal setup before funding.";
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(descriptor.address)}. Transactions can be signed locally after you unlock the vault.${botStatus}`;
     } catch {
       $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} local backup created. Connect this address through a wallet provider to authenticate and fund it.`;
     } finally {
@@ -747,6 +1172,7 @@
   }
 
   async function createLocalWallet() {
+    await ensureLocalWalletModule();
     const chain = $("#new-wallet-chain").value;
     const password = $("#new-wallet-password").value;
     const confirm = $("#new-wallet-password-confirm").value;
@@ -759,10 +1185,12 @@
     const generated = window.ConiLocalWallet.create(chain);
     let secret = generated.secret;
     const vault = await encryptLocalSecret(secret, password, chain, generated.address);
-    localStorage.setItem("coni.internal.vault.v1", JSON.stringify(vault));
+    localStorage.setItem(FAST_WALLET_STORAGE_KEY, JSON.stringify(vault));
+    showRecoverySecret(chain, secret);
     try {
-      await authenticateLocalWallet(generated);
-      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(generated.address)}. Connect a wallet provider before approving transactions.`;
+      const session = await authenticateLocalWallet(generated);
+      const botStatus = session.internalBotAttached ? " Internal bot-wallet records are attached and awaiting signer provisioning." : " Bot-wallet attachment is waiting for the backend; retry the internal setup before funding.";
+      $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet and authenticated ${short(generated.address)}. Transactions can be signed locally after you unlock the vault.${botStatus}`;
     } catch {
       $("#vault-action-status").textContent = `Encrypted ${chain === "solana" ? "Solana" : "EVM"} wallet created at ${short(generated.address)}. Connect this address through a wallet provider to authenticate and fund it.`;
     } finally {
@@ -775,15 +1203,17 @@
   }
 
   async function requestInternalWallet() {
+    const localWallet = state.evm?.local || state.solana?.local;
+    if (!localWallet) {
+      $("#vault-action-status").textContent = "Connect or create a Coni local wallet first. External wallet connections use bot-only mode.";
+      return;
+    }
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/provision`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ mode: "internal-bot" }) });
-      const result = await response.json();
-      preferredBotMode = "internal-bot";
-      localStorage.setItem("coni.bot-wallet.mode.v1", preferredBotMode);
+      const result = await provisionLocalBotWallet();
       $("#vault-action-status").textContent = result.message || "Internal wallet setup is awaiting the audited wallet provisioner.";
       loadBotWallet();
-    } catch {
-      $("#vault-action-status").textContent = "Connect and authenticate a wallet before creating the internal-wallet record.";
+    } catch (error) {
+      $("#vault-action-status").textContent = error?.message || "Connect and authenticate a wallet before creating the internal-wallet record.";
     }
   }
 
@@ -813,13 +1243,13 @@
     const response = await fetch(`${config.apiBaseUrl}/api/bot-wallet/transfer`, { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: JSON.stringify({ botWalletId: activeBotWallet.id, direction: "withdrawal", asset, amountBaseUnits, destination, idempotencyKey: `bot-withdrawal-${crypto.randomUUID()}` }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || result.message || "withdrawal request rejected");
-    $("#funding-status").textContent = `Bot withdrawal reserved for signer approval: ${result.state}. No transaction has been broadcast.`;
+    $("#funding-status").textContent = `Bot withdrawal reserved for signer approval: ${result.state}. Fee ${result.feeAmountBaseUnits || "0"} base units; total reserved ${result.totalReservedBaseUnits || result.amountBaseUnits}. No transaction has been broadcast.`;
     $("#bot-withdraw-form").hidden = true;
     loadBotWallet();
   }
 
-  $("#connect-evm").addEventListener("click", connectEvm);
-  $("#connect-solana").addEventListener("click", connectSolana);
+  $("#connect-evm").addEventListener("click", (event) => runBusy(event.currentTarget, connectEvm));
+  $("#connect-solana").addEventListener("click", (event) => runBusy(event.currentTarget, connectSolana));
   $("#evm-wallet-choice")?.addEventListener("change", (event) => {
     if (event.target.value) localStorage.setItem(EVM_PROVIDER_KEY, event.target.value);
   });
@@ -827,19 +1257,21 @@
     if (event.target.value) localStorage.setItem(SOLANA_PROVIDER_KEY, event.target.value);
   });
   $("#bot-wallet-chain")?.addEventListener("change", (event) => selectBotWallet(event.target.value));
-  $("#prepare-funding").addEventListener("click", prepareFunding);
-  $("#approve-funding").addEventListener("click", () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; }));
-  $("#claim-funding").addEventListener("click", submitFundingClaim);
+  $("#prepare-funding").addEventListener("click", (event) => runBusy(event.currentTarget, prepareFunding));
+  $("#approve-funding").addEventListener("click", (event) => runBusy(event.currentTarget, () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; })));
+  $("#claim-funding").addEventListener("click", (event) => runBusy(event.currentTarget, submitFundingClaim));
   $("#vault-setup").addEventListener("click", () => { $("#vault-modal").hidden = false; document.body.style.overflow = "hidden"; });
   $("#bot-topup").addEventListener("click", startBotTopup);
   $("#bot-withdraw").addEventListener("click", requestBotWithdrawal);
-  $("#submit-bot-withdrawal").addEventListener("click", () => submitBotWithdrawal().catch((error) => { $("#funding-status").textContent = error?.message || "Bot withdrawal could not be requested."; }));
-  $("#import-local-wallet").addEventListener("click", () => importLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local encryption failed; no key was uploaded."; }));
-  $("#verify-local-vault")?.addEventListener("click", () => verifyLocalVault().catch(() => { $("#local-vault-status").textContent = "Local backup verification failed; no secret was uploaded."; }));
+  $("#submit-bot-withdrawal").addEventListener("click", (event) => runBusy(event.currentTarget, () => submitBotWithdrawal().catch((error) => { $("#funding-status").textContent = error?.message || "Bot withdrawal could not be requested."; })));
+  $("#import-local-wallet").addEventListener("click", (event) => runBusy(event.currentTarget, () => importLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local encryption failed; no key was uploaded."; })));
+  $("#verify-local-vault")?.addEventListener("click", (event) => runBusy(event.currentTarget, () => verifyLocalVault().catch(() => { $("#local-vault-status").textContent = "Local backup verification failed; no secret was uploaded."; })));
   $("#export-local-vault")?.addEventListener("click", exportLocalVault);
   $("#delete-local-vault")?.addEventListener("click", deleteLocalVault);
-  $("#create-local-wallet").addEventListener("click", () => createLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local wallet generation failed; no key was uploaded."; }));
-  $("#request-internal-wallet").addEventListener("click", requestInternalWallet);
+  $("#unlock-fast-wallet")?.addEventListener("click", (event) => runBusy(event.currentTarget, () => unlockFastWallet().catch((error) => { $("#vault-action-status").textContent = error?.message || "Fast wallet unlock failed; no key was sent to Coni."; })));
+  $("#lock-fast-wallet")?.addEventListener("click", lockFastWallet);
+  $("#create-local-wallet").addEventListener("click", (event) => runBusy(event.currentTarget, () => createLocalWallet().catch(() => { $("#vault-action-status").textContent = "Local wallet generation failed; no key was uploaded."; })));
+  $("#request-internal-wallet").addEventListener("click", (event) => runBusy(event.currentTarget, requestInternalWallet));
   document.addEventListener("click", (event) => {
     const claim = event.target.closest("[data-claim-observation]");
     if (claim) {
@@ -852,10 +1284,11 @@
       });
     }
   });
+  window.addEventListener("pagehide", clearBrowserSecrets);
   document.querySelectorAll("[data-surface]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-surface]").forEach((item) => item.classList.toggle("active", item === button));
     document.body.dataset.walletSurface = button.dataset.surface;
-    $("#bot-wallet-state").textContent = button.dataset.surface === "bot" ? (activeBotWallet?.status === "active" ? "ACTIVE" : "GATED") : "NORMAL VIEW";
+    renderBotWalletSummary();
   }));
   document.querySelectorAll("[data-wallet-mode]").forEach((button) => button.addEventListener("click", () => {
     document.querySelectorAll("[data-wallet-mode]").forEach((item) => item.classList.toggle("active", item === button));
@@ -864,6 +1297,7 @@
   }));
   document.addEventListener("click", (event) => { if (event.target.matches("[data-close-modal]") || event.target.classList.contains("modal-backdrop")) { event.target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; } });
   renderProviderChoices();
+  ensureRecoveryPanel();
   renderLocalVaultTools();
   restoreConnectionLabels();
   renderConnections();

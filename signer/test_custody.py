@@ -10,6 +10,12 @@ from .custody import readiness
 
 
 class CustodyReadinessTests(unittest.TestCase):
+    def test_railway_private_django_http_is_allowed_but_public_http_is_not(self):
+        railway = readiness({"SIGNER_DJANGO_API_URL": "http://coni-web.railway.internal:8000"})
+        public = readiness({"SIGNER_DJANGO_API_URL": "http://coni.example.com"})
+        self.assertTrue(railway.checks["privateDjangoApi"])
+        self.assertFalse(public.checks["privateDjangoApi"])
+
     def test_disabled_service_is_not_live_ready(self):
         result = readiness({"CONI_EXECUTION_MODE": "disabled"})
         self.assertFalse(result.ready)
@@ -30,6 +36,7 @@ class CustodyReadinessTests(unittest.TestCase):
                 "SIGNER_ADAPTER_CA_FILE": paths["ca"],
                 "SIGNER_ADAPTER_CLIENT_CERT": paths["cert"],
                 "SIGNER_ADAPTER_CLIENT_KEY": paths["key"],
+                "SIGNER_ADAPTER_SHARED_SECRET": "a" * 32,
                 "SIGNER_DATABASE_URL": "postgresql://signer/db",
                 "SIGNER_AUDIT_DATABASE_URL": "postgresql://audit/db",
                 "SIGNER_AUDIT_HMAC_KEY": "a" * 32,
@@ -67,6 +74,7 @@ class CustodyReadinessTests(unittest.TestCase):
                 "SIGNER_ADAPTER_CA_FILE": paths["ca"],
                 "SIGNER_ADAPTER_CLIENT_CERT": paths["cert"],
                 "SIGNER_ADAPTER_CLIENT_KEY": paths["key"],
+                "SIGNER_ADAPTER_SHARED_SECRET": "a" * 32,
                 "SIGNER_DATABASE_URL": "postgresql://signer/db",
                 "SIGNER_AUDIT_DATABASE_URL": "postgresql://audit/db",
                 "SIGNER_AUDIT_HMAC_KEY": "a" * 32,

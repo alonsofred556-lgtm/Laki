@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#071011" />
     <title>Coni Activity</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css" /><link rel="stylesheet" href="theme.css" />
+    <style>
+      .activity-performance{padding:18px 20px 0}.activity-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.activity-stat-grid>div{border:1px solid rgba(95,249,232,.13);background:rgba(95,249,232,.035);border-radius:10px;padding:12px}.activity-stat-grid small,.activity-stat-grid strong{display:block}.activity-stat-grid small{color:#769195;font-size:9px}.activity-stat-grid strong{color:#d9ffff;font-size:14px;margin-top:7px;overflow-wrap:anywhere}.activity-scope-note{color:#769195;font-size:9px;line-height:1.5;margin:12px 0 18px}@media(max-width:720px){.activity-stat-grid{grid-template-columns:1fr 1fr}}@media(max-width:390px){.activity-stat-grid{grid-template-columns:1fr}}
+    </style>
   </head>
   <body>
     <div class="app-shell">
@@ -25,12 +28,13 @@
           <div class="security-banner"><span class="security-icon">✦</span><div><strong>Execution audit boundary</strong><p>Market and bridge activity is read from Pangea. Coni does not invent fills or show simulated profit as settled funds.</p></div><span class="security-status">AUDIT-FIRST</span></div>
           <section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">01 / LIVE FEED</span><h2>Pangea activity</h2></div><button class="secondary-button" id="refresh-activity">Refresh feed <span>↻</span></button></div><div id="activity-ledger" class="activity-ledger"><div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>Loading activity</strong><p>Reading recent trades and bridge transfers.</p></div></div></div></section>
           <section class="wallet-card execution-history-card"><div class="wallet-card-head"><div><span class="section-kicker">02 / CONI EXECUTIONS</span><h2>Your bot routes</h2></div><span class="vault-state">USER-SCOPED</span></div><div id="coni-execution-ledger" class="activity-ledger"><div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>Connect a wallet to view execution history</strong><p>Only this authenticated wallet’s execution records are returned.</p></div></div></div></section>
-          <section class="wallet-grid"><section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">03 / WALLET EVENTS</span><h2>Connected identity</h2></div></div><div id="identity-summary" class="identity-summary">No wallet identity stored on this device.</div></section><section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">04 / BOT STATE</span><h2>Execution guard</h2></div><span class="vault-state">GATED</span></div><p class="funding-copy">The scanner can discover and quote opportunities. Automated signing remains disabled until the signer, policy engine, ledger, and emergency pause controls are configured on the backend.</p><a class="secondary-button full-width" href="settings.html">Review execution settings <span>→</span></a></section></section>
+          <section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">03 / BOT PERFORMANCE</span><h2>Per-user settlement view</h2></div><span class="vault-state">AUTHENTICATED</span></div><div id="activity-performance" class="activity-performance"><div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>Connect a wallet to load performance</strong><p>Profit and settlement values are read from this wallet session only.</p></div></div></div><div id="bot-activity-ledger" class="activity-ledger"></div></section>
+          <section class="wallet-grid"><section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">04 / WALLET EVENTS</span><h2>Connected identity</h2></div></div><div id="identity-summary" class="identity-summary">No authenticated wallet session.</div></section><section class="wallet-card"><div class="wallet-card-head"><div><span class="section-kicker">05 / BOT STATE</span><h2>Execution guard</h2></div><span class="vault-state">GATED</span></div><p class="funding-copy">The scanner can discover and quote opportunities. Automated signing remains disabled until the signer, policy engine, ledger, and emergency pause controls are configured on the backend.</p><a class="secondary-button full-width" href="settings.html">Review execution settings <span>→</span></a></section></section>
           <footer class="site-footer"><span>Coni activity ledger · Pangea source data</span><span>Not financial advice</span></footer>
         </section>
       </main>
     </div>
-    <script src="config.js"></script>
+    <script src="config.js"></script><script src="ui.js"></script>
     <script>
       (() => {
         const $ = (s) => document.querySelector(s);
@@ -40,22 +44,34 @@
         const time = (v) => v ? new Date(Number(v) * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "time unavailable";
         async function load() {
           $("#activity-sync").textContent = "Refreshing feed";
-          const [history, bridge, executions] = await Promise.allSettled([
-            fetch(`${config.marketHistoryUrl}?launch=${encodeURIComponent(config.token.slug)}&hours=168`).then((r) => r.ok ? r.json() : null),
-            fetch(`${config.bridgeActivityUrl}?token=${encodeURIComponent(config.token.slug)}&hours=168&limit=50`).then((r) => r.ok ? r.json() : null),
-            fetch(`${config.apiBaseUrl}/api/execution/history`, { credentials: "include" }).then((r) => r.ok ? r.json() : null)
+          const [history, bridge, executions, activity] = await Promise.allSettled([
+              fetch(`${config.marketHistoryUrl}?hours=168`).then((r) => r.ok ? r.json() : null),
+              fetch(`${config.bridgeActivityUrl}?hours=168&limit=50`).then((r) => r.ok ? r.json() : null),
+            fetch(`${config.apiBaseUrl}/api/execution/history`, { credentials: "include" }).then((r) => r.ok ? r.json() : null),
+            fetch(`${config.apiBaseUrl}/api/activity`, { credentials: "include", cache: "no-store" }).then((r) => r.ok ? r.json() : null)
           ]);
           const rows = [];
-          for (const trade of history.status === "fulfilled" ? (history.value?.recent || []) : []) rows.push(`<div class="activity-ledger-row"><span class="activity-kind trade">${esc(String(trade.side || "trade").toUpperCase())}</span><div><strong>${esc(trade.quoteSymbol || "Quote")} · ${esc(trade.chain || "—")}</strong><small>${time(trade.timestamp)} · tx ${esc(short(trade.txHash))}</small></div><b>${trade.valueUsd == null ? "—" : `$${Number(trade.valueUsd).toLocaleString()}`}</b></div>`);
-          for (const transfer of bridge.status === "fulfilled" ? (bridge.value?.transfers || []) : []) rows.push(`<div class="activity-ledger-row"><span class="activity-kind bridge">BRIDGE</span><div><strong>${esc(transfer.from)} → ${esc(transfer.to)}</strong><small>${time(transfer.at)} · ${transfer.complete ? "delivered" : "in flight"}</small></div><b>${esc(transfer.amount)}</b></div>`);
+          const historyPayload = history.status === "fulfilled" ? history.value : null;
+          const allTrades = Array.isArray(historyPayload?.recent) ? historyPayload.recent : (historyPayload?.launches || []).flatMap((launch) => (launch.recent || []).map((trade) => ({ ...trade, launchSymbol: launch.symbol || launch.slug })));
+          for (const trade of allTrades) rows.push(`<div class="activity-ledger-row"><span class="activity-kind trade">${esc(String(trade.side || "trade").toUpperCase())}</span><div><strong>${esc(trade.launchSymbol || trade.quoteSymbol || "Quote")} · ${esc(trade.chain || "—")}</strong><small>${time(trade.timestamp)} · tx ${esc(short(trade.txHash))}</small></div><b>${trade.valueUsd == null ? "—" : `$${Number(trade.valueUsd).toLocaleString()}`}</b></div>`);
+          for (const transfer of bridge.status === "fulfilled" ? (bridge.value?.transfers || []) : []) rows.push(`<div class="activity-ledger-row"><span class="activity-kind bridge">BRIDGE</span><div><strong>${esc(transfer.slug || "Pangea route")} · ${esc(transfer.from)} → ${esc(transfer.to)}</strong><small>${time(transfer.at)} · ${transfer.complete ? "delivered" : "in flight"}</small></div><b>${esc(transfer.amount)}</b></div>`);
           $("#activity-ledger").innerHTML = rows.length ? rows.slice(0, 30).join("") : `<div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>No activity returned</strong><p>When Pangea exposes new activity, it will appear here automatically.</p></div></div>`;
           const executionRows = executions.status === "fulfilled" ? (executions.value?.executions || []) : [];
           $("#coni-execution-ledger").innerHTML = executionRows.length ? executionRows.slice(0, 30).map((item) => {
             const profit = item.realizedProfitUsd != null ? `$${Number(item.realizedProfitUsd).toFixed(4)}` : item.expectedProfitUsd != null ? `expected $${Number(item.expectedProfitUsd).toFixed(4)}` : "—";
             const route = (item.legs || []).map((leg) => `${esc(leg.kind)}:${esc(leg.state)}`).join(" · ");
             const payout = item.profitSettlement ? ` · USDG ${esc(item.profitSettlement.state)}` : "";
-            return `<div class="activity-ledger-row"><span class="activity-kind ${item.state === "settled" ? "trade" : "bridge"}">${esc(String(item.state).toUpperCase())}</span><div><strong>${esc(item.slug || "Pangea route")}</strong><small>${route || "Awaiting lifecycle events"}${payout} · ${esc(item.createdAt)}</small></div><b>${esc(profit)}</b></div>`;
+            return `<div class="activity-ledger-row"><span class="activity-kind ${item.state === "settled" ? "trade" : "bridge"}">${esc(String(item.state).toUpperCase())}</span><div><strong>${esc(item.slug || "Pangea route")}</strong><small>${route || "Awaiting lifecycle events"}${payout} · ${esc(new Date(item.createdAt).toLocaleString())}</small></div><b>${esc(profit)}</b></div>`;
           }).join("") : `<div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>No Coni execution records</strong><p>Connect and authenticate a wallet; paper scans do not appear as settled trades.</p></div></div>`;
+          const activityData = activity.status === "fulfilled" ? activity.value : null;
+          const performance = activityData?.pnl;
+          const compounding = activityData?.compounding;
+          if (performance) {
+            $("#activity-performance").innerHTML = `<div class="activity-stat-grid"><div><small>Realized PNL</small><strong>$${esc(performance.realizedUsd || "0")}</strong></div><div><small>Expected PNL</small><strong>$${esc(performance.expectedUsd || "0")}</strong></div><div><small>Compounded</small><strong>$${esc(compounding?.allocatedProfitUsd || "0")}</strong></div><div><small>USDG settlement</small><strong>${esc(activityData.settlements?.confirmed || 0)} confirmed</strong></div></div><p class="activity-scope-note">${esc(performance.settledTrades || 0)} settled trades · ${esc(compounding?.pendingReinvestment || 0)} reinvestment approvals pending · ${esc(activityData.settlements?.pending || 0)} USDG settlements pending.</p>`;
+            $("#identity-summary").innerHTML = (activityData.identities || []).map((x) => `<div class="identity-row"><span>●</span><strong>${esc(x.chain)}</strong><code>${esc(short(x.address))}</code></div>`).join("") || "No authenticated wallet session.";
+            const botRows = (activityData.recent || []).slice(0, 30);
+            $("#bot-activity-ledger").innerHTML = botRows.length ? botRows.map((item) => { const value = item.kind === "trade" ? (item.realizedProfitUsd && item.realizedProfitUsd !== "0" ? `$${esc(item.realizedProfitUsd)}` : item.expectedProfitUsd && item.expectedProfitUsd !== "0" ? `exp $${esc(item.expectedProfitUsd)}` : "—") : item.kind === "fee" ? `${esc(item.asset)} · ${esc(item.amountBaseUnits)} · ${esc(item.feeBps)} bps` : `${esc(item.asset)} · ${esc(item.amountBaseUnits)}`; const label = item.kind === "fee" ? `${item.feeKind || "service"} fee` : item.kind; return `<div class="activity-ledger-row"><span class="activity-kind ${item.kind === "trade" ? "trade" : item.kind === "fee" ? "bridge" : "bridge"}">${esc(String(label).toUpperCase())}</span><div><strong>${esc(item.slug || (item.kind === "fee" ? `${item.feeKind || "service"} fee wallet` : `${item.chain || "—"} bot wallet`))}</strong><small>${esc(item.state)} · ${esc(new Date(item.createdAt).toLocaleString())}${item.txHash ? ` · tx ${esc(short(item.txHash))}` : ""}</small></div><b>${value}</b></div>`; }).join("") : `<div class="activity-empty"><span class="activity-glyph">⌁</span><div><strong>No bot activity yet</strong><p>Funding, signed routes, fees, and bot withdrawals will appear here.</p></div></div>`;
+          }
           $("#activity-sync").textContent = "Feed updated";
           $("#activity-status").textContent = `Updated ${new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"})}`;
         }

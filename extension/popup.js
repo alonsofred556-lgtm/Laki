@@ -1,4 +1,14 @@
 (() => {
+  const theme = document.createElement("link");
+  theme.rel = "stylesheet";
+  theme.href = "../theme.css";
+  document.head.appendChild(theme);
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    button.classList.add("is-loading", "button-pop");
+    window.setTimeout(() => button.classList.remove("is-loading", "button-pop"), 900);
+  });
   const fallback = [{ symbol: "ZGAP", name: "Zero Gap", gross: 0, from: "—", to: "—" }];
   const list = document.querySelector("#popup-list");
   const edge = document.querySelector("#popup-edge");
@@ -24,5 +34,14 @@
   }
   document.querySelector("#popup-refresh").addEventListener("click", load);
   document.querySelector("#open-dashboard").addEventListener("click", () => chrome.tabs.create({ url: window.CONI_CONFIG.deploymentUrl }));
+  document.querySelector("#open-wallet").addEventListener("click", (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.classList.add("is-loading", "button-pop");
+    chrome.tabs.create({ url: window.CONI_CONFIG.walletUrl }, () => {
+      button.disabled = false;
+      button.classList.remove("is-loading", "button-pop");
+    });
+  });
   load();
 })();

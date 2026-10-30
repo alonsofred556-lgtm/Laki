@@ -101,4 +101,16 @@ async function signMessage(chain, secret, message) {
   throw new Error("unsupported local wallet chain");
 }
 
-window.ConiLocalWallet = Object.freeze({ create, describe, signMessage });
+async function signEvmTransaction(chain, secret, transaction) {
+  if (!EVM_CHAINS.has(chain)) throw new Error("unsupported EVM wallet chain");
+  const account = privateKeyToAccount(secret);
+  const bigintFields = ["nonce", "gas", "gasPrice", "value", "maxFeePerGas", "maxPriorityFeePerGas"];
+  const normalized = { ...transaction, type: transaction.type || "legacy" };
+  bigintFields.forEach((field) => {
+    if (normalized[field] !== undefined && typeof normalized[field] !== "bigint") normalized[field] = BigInt(normalized[field]);
+  });
+  if (normalized.chainId !== undefined && typeof normalized.chainId !== "number") normalized.chainId = Number(normalized.chainId);
+  return account.signTransaction(normalized);
+}
+
+window.ConiLocalWallet = Object.freeze({ create, describe, signMessage, signEvmTransaction });

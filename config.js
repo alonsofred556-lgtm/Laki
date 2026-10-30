@@ -1,9 +1,13 @@
 const CONI_DEPLOYMENT_URL = "https://laki-production.up.railway.app";
+const CONI_WEB_ORIGIN = window.location.protocol === "http:" || window.location.protocol === "https:";
+const CONI_APP_ORIGIN = CONI_WEB_ORIGIN && window.location.origin && window.location.origin !== "null" ? window.location.origin : CONI_DEPLOYMENT_URL;
+const CONI_API_BASE_URL = CONI_WEB_ORIGIN ? "" : CONI_DEPLOYMENT_URL;
 window.CONI_CONFIG = {
   deploymentUrl: CONI_DEPLOYMENT_URL,
-  apiBaseUrl: window.location.hostname === "laki-production.up.railway.app" ? window.location.origin : "",
+  apiBaseUrl: CONI_API_BASE_URL,
   pangeaPoolsUrl: "https://www.pangea.trade/api/pools",
   marketDataUrl: "/api/market/pools",
+  motionMarketUrl: "/api/market/motion",
   tokenRegistryUrl: "/api/market/tokens",
   tokenMetadataUrl: "/api/market/token-meta",
   marketHistoryUrl: "/api/market/history",
@@ -11,7 +15,8 @@ window.CONI_CONFIG = {
   tradeQuoteUrl: "/api/market/trade-quote",
   bridgeQuoteUrl: "/api/market/bridge-quote",
   launchesUrl: "/api/market/launches",
-  solanaRpcUrl: "https://api.mainnet-beta.solana.com",
+  // Browser reads go through Coni's authenticated relay; node URLs stay private.
+  solanaRpcUrl: `${CONI_APP_ORIGIN}/api/rpc/solana`,
   refreshMs: 15000,
   branding: {
     icon: "assets/coni_logo_icon-2.png",

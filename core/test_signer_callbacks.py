@@ -13,7 +13,7 @@ from django.test import RequestFactory, SimpleTestCase, override_settings
 
 django.setup()
 
-from .views import signer_bot_wallet_provision_requests, signer_callback_allowed
+from .views import signer_bot_wallet_attest, signer_bot_wallet_provision_requests, signer_callback_allowed
 
 
 class SignerCallbackTests(SimpleTestCase):
@@ -61,3 +61,40 @@ class SignerCallbackTests(SimpleTestCase):
         self.assertEqual(payload["requests"][0]["chain"], "base")
         self.assertNotIn("privateKey", payload["requests"][0])
         self.assertNotIn("seed", payload["requests"][0])
+
+    def test_provision_attest_rejects_private_material_before_database_access(self):
+        request = RequestFactory().post(
+            "/internal/signer/bot-wallet-attest",
+            data=json.dumps({
+                "provisionRequestId": "00000000-0000-4000-8000-000000000001",
+                "botWalletId": "00000000-0000-4000-8000-000000000002",
+                "chain": "base",
+                "address": "0x" + "1" * 40,
+                "signerKeyRef": "mpc/key/base-1",
+                "attestationHash": "a" * 64,
+                "privateKey": "must-never-cross-callback",
+            }),
+            content_type="application/json",
+        )
+        with patch("core.views.signer_provision_allowed", return_value=True):
+            response = signer_bot_wallet_attest(request)
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_provision_attest_rejects_invalid_solana_address_before_database_access(self):
+        request = RequestFactory().post(
+            "/internal/signer/bot-wallet-attest",
+            data=json.dumps({
+                "provisionRequestId": "00000000-0000-4000-8000-000000000001",
+                "botWalletId": "00000000-0000-4000-8000-000000000002",
+                "chain": "solana",
+                "address": "not-a-solana-address",
+                "signerKeyRef": "mpc/key/solana-1",
+                "attestationHash": "a" * 64,
+            }),
+            content_type="application/json",
+        )
+        with patch("core.views.signer_provision_allowed", return_value=True):
+            response = signer_bot_wallet_attest(request)
+
+        self.assertEqual(response.status_code, 400)

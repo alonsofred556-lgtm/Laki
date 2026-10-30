@@ -78,10 +78,14 @@ class BotWalletTransfer(models.Model):
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
     amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    fee_amount_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
+    total_reserved_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
     destination = models.CharField(max_length=64)
     state = models.CharField(max_length=32, default="pending-approval")
     tx_hash = models.CharField(max_length=160, blank=True)
     failure_code = models.CharField(max_length=64, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -144,6 +148,8 @@ class FundingIntent(models.Model):
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
     amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    fee_amount_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
+    net_amount_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
     destination = models.CharField(max_length=64)
     status = models.CharField(max_length=32)
     expires_at = models.DateTimeField()
@@ -244,6 +250,8 @@ class WithdrawalRequest(models.Model):
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
     amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    fee_amount_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
+    total_reserved_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
     destination = models.CharField(max_length=64)
     status = models.CharField(max_length=32, default="pending-approval")
     nonce = models.CharField(max_length=96, unique=True)
@@ -253,6 +261,8 @@ class WithdrawalRequest(models.Model):
     expires_at = models.DateTimeField()
     approved_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = "withdrawal_requests"
@@ -262,15 +272,41 @@ class WithdrawalRequest(models.Model):
         ]
 
 
+class WithdrawalEvent(models.Model):
+    """Append-only, idempotent evidence returned by the private signer."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    withdrawal = models.ForeignKey(WithdrawalRequest, on_delete=models.PROTECT, related_name="events")
+    event = models.CharField(max_length=24)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "withdrawal_events"
+        indexes = [models.Index(fields=["withdrawal", "created_at"], name="withdrawal_event_created")]
+
+
 class FeeEvent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user_identity = models.ForeignKey(WalletIdentity, null=True, on_delete=models.PROTECT, db_column="user_identity_id")
     execution_id = models.CharField(max_length=128, null=True, blank=True)
+    kind = models.CharField(max_length=24, default="trade")
+    source_id = models.CharField(max_length=128, default="")
     asset = models.CharField(max_length=16)
     chain = models.CharField(max_length=32)
+    gross_amount_base_units = models.DecimalField(max_digits=78, decimal_places=0, default=0)
     amount_base_units = models.DecimalField(max_digits=78, decimal_places=0)
+    fee_bps = models.PositiveIntegerField(default=0)
     recipient = models.CharField(max_length=64)
-    status = models.CharField(max_length=16, default="accrued")
+    status = models.CharField(max_length=16, default="pending")
+    idempotency_key = models.CharField(max_length=160, unique=True, default=uuid.uuid4)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    last_event_key = models.CharField(max_length=160, blank=True)
+    last_event = models.CharField(max_length=16, blank=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    lease_until = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -283,6 +319,7 @@ class BotControl(models.Model):
     paused = models.BooleanField(default=True)
     min_net_bps = models.IntegerField(default=50)
     max_notional_usd = models.DecimalField(max_digits=30, decimal_places=8, default=25)
+    compound_profit_bps = models.IntegerField(default=7000)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -298,6 +335,7 @@ class UserBotControl(models.Model):
     paused = models.BooleanField(default=False)
     min_net_bps = models.IntegerField(default=100)
     max_notional_usd = models.DecimalField(max_digits=30, decimal_places=8, default=25)
+    compound_profit_bps = models.IntegerField(default=7000)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -427,6 +465,46 @@ class ProfitSettlement(models.Model):
     class Meta:
         db_table = "profit_settlements"
         indexes = [models.Index(fields=["state", "created_at"], name="profit_state_created")]
+
+
+class ProfitAllocation(models.Model):
+    """Immutable allocation of confirmed profit between reinvestment and payout.
+
+    ``compound_profit_usd`` is not treated as working capital until the
+    signer proves that the reinvestment reached the user's bot wallet. This
+    prevents the planner from trading against accounting-only profit.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    execution = models.OneToOneField(Execution, on_delete=models.PROTECT, related_name="profit_allocation")
+    user_identity = models.ForeignKey(WalletIdentity, on_delete=models.PROTECT, db_column="user_identity_id")
+    realized_profit_usd = models.DecimalField(max_digits=30, decimal_places=8)
+    compound_profit_usd = models.DecimalField(max_digits=30, decimal_places=8)
+    payout_profit_usd = models.DecimalField(max_digits=30, decimal_places=8)
+    compound_bps = models.IntegerField(default=7000)
+    compound_state = models.CharField(max_length=32, default="pending-approval")
+    compound_tx_hash = models.CharField(max_length=160, blank=True)
+    compound_proof = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "profit_allocations"
+        indexes = [models.Index(fields=["compound_state", "created_at"], name="profit_alloc_state_created")]
+
+
+class ProfitCompoundEvent(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    idempotency_key = models.CharField(max_length=128, unique=True)
+    allocation = models.ForeignKey(ProfitAllocation, on_delete=models.PROTECT, related_name="events")
+    event = models.CharField(max_length=24)
+    tx_hash = models.CharField(max_length=160, blank=True)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "profit_compound_events"
+        indexes = [models.Index(fields=["allocation", "created_at"], name="profit_comp_event_created")]
 
 
 class ProfitSettlementEvent(models.Model):

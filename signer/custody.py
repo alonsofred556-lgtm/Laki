@@ -91,6 +91,7 @@ def readiness(environ=None):
     client_key = str(env.get("SIGNER_ADAPTER_CLIENT_KEY", "")).strip()
     django_api = urlparse(str(env.get("SIGNER_DJANGO_API_URL", "")).strip())
     shared_secret = str(env.get("SIGNER_SHARED_SECRET", ""))
+    adapter_shared_secret = str(env.get("SIGNER_ADAPTER_SHARED_SECRET", ""))
     provision_secret = str(env.get("CONI_SIGNER_PROVISION_SECRET", ""))
     event_secret = str(env.get("CONI_SIGNER_EVENT_SECRET", ""))
     required_approvals = int(env.get("SIGNER_REQUIRED_APPROVALS", "0") or 0) if str(env.get("SIGNER_REQUIRED_APPROVALS", "0")).isdigit() else 0
@@ -101,7 +102,20 @@ def readiness(environ=None):
         "adapterCaMounted": bool(ca_file) and Path(ca_file).is_file(),
         "adapterClientCertificateMounted": bool(client_cert) and Path(client_cert).is_file(),
         "adapterClientKeyMounted": bool(client_key) and Path(client_key).is_file(),
-        "privateDjangoApi": django_api.scheme == "https" and bool(django_api.netloc),
+        "adapterSharedSecret": len(adapter_shared_secret) >= 32,
+        # Railway private networking is encrypted inside the project and
+        # documents HTTP over <service>.railway.internal.  Permit that exact
+        # private hostname form, while requiring HTTPS for every other host.
+        "privateDjangoApi": (
+            django_api.scheme == "https" and bool(django_api.netloc)
+        ) or (
+            django_api.scheme == "http"
+            and bool(django_api.hostname)
+            and django_api.hostname == "railway.internal"
+            or django_api.scheme == "http"
+            and bool(django_api.hostname)
+            and django_api.hostname.endswith(".railway.internal")
+        ),
         "provisionCallbackSecret": len(provision_secret) >= 32,
         "eventCallbackSecret": len(event_secret) >= 32,
         "callbackSecretsDistinct": len({shared_secret, provision_secret, event_secret}) == 3 and all(len(value) >= 32 for value in (shared_secret, provision_secret, event_secret)),

@@ -10,7 +10,7 @@ from django.test import RequestFactory, SimpleTestCase, override_settings
 
 django.setup()
 
-from .views import funding_assets
+from .views import decimal_units, funding_assets
 
 
 class FundingAssetEndpointTests(SimpleTestCase):
@@ -40,3 +40,6 @@ class FundingAssetEndpointTests(SimpleTestCase):
         require_session.return_value = self.identity
         response = funding_assets(self.factory.get("/api/funding/assets?chain=solana"))
         self.assertEqual(response.status_code, 403)
+
+    def test_decimal_units_rejects_values_wider_than_the_ledger_field(self):
+        self.assertIsNone(decimal_units("1" + "0" * 78, 18))

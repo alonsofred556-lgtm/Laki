@@ -35,7 +35,7 @@ function headers(origin) {
     "access-control-allow-headers": "content-type, x-coni-ops-token",
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "cache-control": "no-store",
-    "content-security-policy": "default-src 'self'; connect-src 'self' https://www.pangea.trade https://api.mainnet-beta.solana.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+    "content-security-policy": "default-src 'self'; connect-src 'self' https://www.pangea.trade; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "referrer-policy": "no-referrer",
     "strict-transport-security": process.env.NODE_ENV === "production" ? "max-age=31536000; includeSubDomains" : "max-age=0",
     "x-content-type-options": "nosniff",

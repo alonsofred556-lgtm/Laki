@@ -13,6 +13,8 @@ NATIVE_ASSETS = {
     "solana": ("SOL", 9),
 }
 
+SOLANA_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+
 
 def _json_object(value):
     try:
@@ -47,6 +49,18 @@ def asset_decimals(asset, chain=None):
 
 def supported_asset(asset, chain):
     return asset_decimals(asset, chain) is not None or bool(token_config(asset, chain))
+
+
+def browser_funding_supported(asset, chain):
+    """Return whether the current browser transaction builder supports an asset."""
+    if chain != "solana" or str(asset).upper() == "SOL":
+        return True
+    config = token_config(asset, chain) or {}
+    program_id = config.get("programId") if isinstance(config, dict) else None
+    # The browser bundle currently builds legacy SPL instructions only. A
+    # missing program id retains the existing legacy-token default; explicit
+    # Token-2022 configuration is discoverable but not fundable from this UI.
+    return not program_id or str(program_id) == SOLANA_TOKEN_PROGRAM
 
 
 def recipient_for(asset, chain):

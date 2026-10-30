@@ -144,7 +144,15 @@ def sign_intent(payload: SignIntent, authorization: str | None = Header(default=
             pass
         record("sign-intent", "adapter-unavailable", digest=validated["digest"], idempotency_key=payload.idempotencyKey, reason=str(exc))
         raise HTTPException(status_code=503, detail="HSM/MPC signer adapter unavailable") from exc
-    response = {"accepted": True, "state": "signed", "intentDigest": validated["digest"], "signature": result["signature"], "adapter": result["adapter"]}
+    response = {
+        "accepted": True,
+        "state": "signed",
+        "intentDigest": validated["digest"],
+        "signature": result["signature"],
+        "signerKeyRef": result["signerKeyRef"],
+        "attestation": result["attestation"],
+        "adapter": result["adapter"],
+    }
     try:
         store.mark_signed(payload.idempotencyKey, validated["digest"], response)
     except IntentStoreError as exc:

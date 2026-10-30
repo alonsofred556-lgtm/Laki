@@ -9,6 +9,7 @@ from django.utils import timezone
 from .audit import record_event
 from .funding import account_for
 from .models import Execution, LedgerEntry, ProfitSettlement, ProfitSettlementEvent, WalletIdentity
+from .profit_compounding import allocate_confirmed_profit
 
 
 SETTLEMENT_EVENTS = {"submitted", "confirmed", "failed"}
@@ -71,6 +72,12 @@ def prepare_usdg_settlement(*, execution_id, user_identity_id, realized_profit_u
         raise ValueError("USDG settlement requires an authenticated EVM wallet identity")
     if realized <= 0 or price <= 0 or not recipient or recipient.lower() != identity.address.lower():
         raise ValueError("invalid realized profit, USDG price, or recipient")
+    allocation = allocate_confirmed_profit(execution.id)
+    if allocation.user_identity_id != identity.id:
+        raise ValueError("profit allocation identity mismatch")
+    realized = allocation.payout_profit_usd
+    if realized <= 0:
+        raise ValueError("all realized profit is allocated to bot compounding")
     amount = (realized / price * (Decimal("10") ** settings.CONI_PROFIT_SETTLEMENT_DECIMALS)).to_integral_value(rounding=ROUND_DOWN)
     if amount <= 0:
         raise ValueError("realized profit is below one USDG base unit")
@@ -108,6 +115,8 @@ def record_usdg_settlement_event(*, settlement_id, event, idempotency_key, tx_ha
     if existing:
         if existing.settlement_id != settlement.id:
             raise ValueError("idempotency key belongs to another settlement")
+        if existing.event != event or (tx_hash and existing.tx_hash != tx_hash):
+            raise ValueError("idempotency key does not match the original settlement event")
         return settlement
     next_state = next_settlement_state(settlement.state, event)
     proof = metadata if isinstance(metadata, dict) else {}

@@ -1,0 +1,9 @@
+[build]
+dockerfilePath = "custody_adapter/Dockerfile"
+
+[deploy]
+startCommand = "uvicorn custody_adapter.app:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/health"
+healthcheckTimeout = 15
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

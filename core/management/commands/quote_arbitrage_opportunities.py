@@ -25,7 +25,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--once", action="store_true", help="Process one batch and exit.")
-        parser.add_argument("--loop-seconds", type=int, default=10, help="Delay between batches.")
+        parser.add_argument("--loop-seconds", type=int, default=int(getattr(settings, "CONI_ARBITRAGE_QUOTE_INTERVAL_SECONDS", 5)), help="Delay between batches.")
         parser.add_argument(
             "--batch-size",
             type=int,
@@ -120,4 +120,4 @@ class Command(BaseCommand):
             self.stdout.write(self.style.SUCCESS(str(result)))
             if options["once"]:
                 return
-            time.sleep(max(5, options["loop_seconds"]))
+            time.sleep(max(3, options["loop_seconds"]))

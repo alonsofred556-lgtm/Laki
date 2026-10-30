@@ -8,13 +8,18 @@ has independently validated and executed the exact transaction intent.
 import hashlib
 import hmac
 import json
+import time
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .audit import record_event
-from .models import ArbitrageOpportunity, BotWallet, Execution, ExecutionEvent, ExecutionLeg, WalletIdentity
+from .assets import native_asset
+from .fees import accrue_fee
+from .funding import account_for
+from .models import ArbitrageOpportunity, BotWallet, Execution, ExecutionEvent, ExecutionLeg, FeeEvent, LedgerEntry, WalletIdentity
 
 
 EXECUTION_EVENTS = {
@@ -95,9 +100,31 @@ def _quote_hash(artifact):
     ).hexdigest()
 
 
+def _quote_age_seconds(quote):
+    if not isinstance(quote, dict) or quote.get("_coniQuotedAt") in (None, ""):
+        return None
+    try:
+        stamp = float(quote["_coniQuotedAt"])
+    except (TypeError, ValueError):
+        return None
+    if stamp > 100_000_000_000:
+        stamp /= 1000
+    return time.time() - stamp
+
+
+def _quote_artifact_is_fresh(artifact):
+    """Prevent a fast signer from receiving an old but validly hashed route."""
+    if not isinstance(artifact, dict):
+        return False
+    max_age = int(getattr(settings, "CONI_ARBITRAGE_MAX_QUOTE_AGE_SECONDS", 10))
+    ages = (_quote_age_seconds(artifact.get("trade")), _quote_age_seconds(artifact.get("bridge")))
+    return all(age is not None and -2 <= age <= max_age for age in ages)
+
+
 def execution_payload(execution):
     execution = Execution.objects.select_related("profit_settlement").prefetch_related("legs", "events").get(id=execution.id)
     settlement = getattr(execution, "profit_settlement", None)
+    fee = FeeEvent.objects.filter(execution_id=str(execution.id), kind="trade").first()
     return {
         "id": str(execution.id),
         "slug": execution.slug,
@@ -124,6 +151,16 @@ def execution_payload(execution):
             "txHash": settlement.tx_hash,
             "settledAt": settlement.settled_at.isoformat() if settlement.settled_at else None,
         } if settlement else None,
+        "tradeFee": {
+            "asset": fee.asset,
+            "chain": fee.chain,
+            "amountBaseUnits": str(fee.amount_base_units),
+            "grossAmountBaseUnits": str(fee.gross_amount_base_units),
+            "feeBps": fee.fee_bps,
+            "recipient": fee.recipient,
+            "state": fee.status,
+            "txHash": fee.tx_hash or None,
+        } if fee else None,
         "legs": [
             {
                 "id": str(leg.id),
@@ -178,6 +215,8 @@ def signer_intent_payload(execution):
         raise ValueError("execution bot wallets are not currently attested and active")
     if not execution.quote_hash or not isinstance(execution.quote_artifact, dict) or not execution.quote_artifact.get("trade") or not execution.quote_artifact.get("bridge"):
         raise ValueError("execution quote artifact is incomplete")
+    if not _quote_artifact_is_fresh(execution.quote_artifact):
+        raise ValueError("execution quote artifact is stale; request a fresh route")
     artifact_hash = _quote_hash({"trade": execution.quote_artifact["trade"], "bridge": execution.quote_artifact["bridge"]})
     if not hmac.compare_digest(str(execution.quote_hash), artifact_hash):
         raise ValueError("execution quote artifact hash mismatch")
@@ -222,9 +261,13 @@ def create_execution_from_opportunity(*, identity: WalletIdentity, opportunity_i
         raise ValueError("opportunity quote has expired")
     if not quote_hash or not decision.get("executable"):
         raise ValueError("opportunity does not contain an executable quote decision")
+    if int(decision.get("confidenceBps", 0)) < int(getattr(settings, "CONI_ARBITRAGE_MIN_CONFIDENCE_BPS", 8500)):
+        raise ValueError("opportunity confidence is below the execution policy")
     artifact = decision.get("quoteArtifact")
     if not isinstance(artifact, dict) or not isinstance(artifact.get("trade"), dict) or not isinstance(artifact.get("bridge"), dict):
         raise ValueError("execution requires a complete quote artifact")
+    if not _quote_artifact_is_fresh(artifact):
+        raise ValueError("execution quote artifact is stale; request a fresh route")
     if not hmac.compare_digest(str(quote_hash), _quote_hash({"trade": artifact["trade"], "bridge": artifact["bridge"]})):
         raise ValueError("quote artifact does not match quote hash")
     if bot_wallet.owner_id != identity.id or bot_wallet.chain != opportunity.buy_chain or bot_wallet.status != "active" or not bot_wallet.address:
@@ -316,6 +359,8 @@ def record_execution_event(*, execution_id, event, idempotency_key, tx_hash="", 
     if existing:
         if existing.execution_id != execution.id:
             raise ValueError("idempotency key belongs to another execution")
+        if existing.event != event or (tx_hash and existing.tx_hash != tx_hash) or (bridge_guid and existing.bridge_guid != bridge_guid):
+            raise ValueError("idempotency key does not match the original execution event")
         return execution
     next_state = next_execution_state(execution.state, event)
     profit = _money(realized_profit_usd) if realized_profit_usd is not None else None
@@ -355,5 +400,34 @@ def record_execution_event(*, execution_id, event, idempotency_key, tx_hash="", 
             if leg_state in {"confirmed", "destination-confirmed"}:
                 leg.confirmed_at = timezone.now()
             leg.save(update_fields=["state", "tx_hash", "bridge_guid", "confirmed_at", "updated_at"])
+    if event == "settled":
+        buy_leg = execution.legs.filter(kind="buy").first()
+        if buy_leg and execution.bot_wallet_id:
+            bot_wallet = BotWallet.objects.get(id=execution.bot_wallet_id)
+            fee_asset = native_asset(bot_wallet.chain)
+            if fee_asset:
+                # The fee transfer is an independent signer intent.  The
+                # trade's on-chain route remains bound to its quote hash.
+                fee_event = accrue_fee(
+                    kind="trade",
+                    source_id=str(execution.id),
+                    asset=fee_asset,
+                    chain=bot_wallet.chain,
+                    gross_amount_base_units=buy_leg.amount_in_base_units,
+                    user_identity=execution.user_identity,
+                    execution_id=execution.id,
+                )
+                if fee_event:
+                    available = account_for(execution.user_identity, fee_asset, bot_wallet.chain, "bot-available", bot_wallet=bot_wallet)
+                    fee_account = account_for(None, fee_asset, bot_wallet.chain, "fee-payable")
+                    LedgerEntry.objects.get_or_create(
+                        reference_type="trade-fee-accrual",
+                        reference_id=str(fee_event.id),
+                        debit_account=available,
+                        credit_account=fee_account,
+                        defaults={"asset": fee_asset, "amount_base_units": fee_event.amount_base_units},
+                    )
+        from .profit_compounding import allocate_confirmed_profit
+        allocate_confirmed_profit(execution.id)
     record_event("execution.event", actor_type="signer", subject_type="execution", subject_id=execution.id, metadata={"event": event, "idempotencyKey": idempotency_key, "txHash": tx_hash or None, "bridgeGuid": bridge_guid or None})
     return execution

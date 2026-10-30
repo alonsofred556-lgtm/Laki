@@ -8,10 +8,19 @@ from django.test import SimpleTestCase
 django.setup()
 
 from .chain_verifier import _solana_native_transfer_match
-from .deposit_discovery import _solana_instruction_matches
+from .deposit_discovery import _solana_instruction_matches, _spl_account_lookup_params
 
 
 class SolanaSplDiscoveryTests(SimpleTestCase):
+    def test_token_account_lookup_uses_filter_and_config_parameters(self):
+        self.assertEqual(
+            _spl_account_lookup_params("mint-address"),
+            [
+                {"mint": "mint-address"},
+                {"encoding": "jsonParsed", "commitment": "finalized"},
+            ],
+        )
+
     def test_parses_transfer_checked_into_treasury_token_account(self):
         transaction = {
             "transaction": {"message": {"accountKeys": [{"pubkey": "source-account"}, {"pubkey": "treasury-token-account"}]}},
