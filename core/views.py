@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import uuid
@@ -38,6 +39,8 @@ from .profit_settlement import prepare_usdg_settlement, record_usdg_settlement_e
 from .rate_limit import RateLimitUnavailable, allow as redis_allow
 from .chain_verifier import observation_is_stale
 from .rpc import RpcError, forward, configured_health
+
+auth_logger = logging.getLogger("coni.auth")
 
 EVM_CHAINS = {"ethereum", "base", "robinhood", "bsc"}
 CHAINS = EVM_CHAINS | {"solana"}
@@ -445,8 +448,10 @@ def auth_verify(request):
         supplied_address = data.get("address")
         challenge = WalletChallenge.objects.filter(id=data.get("challengeId"), expires_at__gt=timezone.now()).first()
         if not challenge or not wallet_address_matches(challenge.chain, supplied_address, challenge.address) or not isinstance(data.get("signature"), str):
+            auth_logger.warning("wallet auth rejected request_id=%s reason=challenge-or-address", request_id(request))
             return error("challenge expired or invalid", 401, request)
         if not verify_signature(challenge, data["signature"]):
+            auth_logger.warning("wallet auth rejected request_id=%s reason=signature chain=%s", request_id(request), challenge.chain)
             return error("wallet signature verification failed", 401, request)
         with transaction.atomic():
             locked_challenge = WalletChallenge.objects.select_for_update().filter(id=challenge.id, consumed_at__isnull=True, expires_at__gt=timezone.now()).first()
@@ -477,6 +482,7 @@ def auth_verify(request):
         record_event("wallet.authenticate", actor_type="wallet", actor_id=identity.id, subject_type="wallet", subject_id=identity.id, request_id=request_id(request), metadata={"chain": identity.chain})
         return api_response({"authenticated": True, "wallet": {"id": str(identity.id), "chain": identity.chain, "address": identity.address}, "botWallet": bot_wallet_payload(bot_wallet), "botWallets": [bot_wallet_payload(item) for item in visible_bot_wallets]}, 200, request)
     except Exception as exc:
+        auth_logger.exception("wallet auth exception request_id=%s error_type=%s", request_id(request), type(exc).__name__)
         return error("wallet signature verification failed", 401, request) if not settings.DEBUG else error(str(exc), 400, request)
 
 

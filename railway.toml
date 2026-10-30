@@ -3,7 +3,7 @@ buildCommand = "python manage.py collectstatic --noinput"
 
 [deploy]
 preDeployCommand = "python manage.py migrate --noinput"
-startCommand = "gunicorn coni_backend.wsgi:application --bind 0.0.0.0:$PORT"
+startCommand = "gunicorn coni_backend.wsgi:application --bind 0.0.0.0:$PORT --access-logfile - --error-logfile - --log-level info --capture-output"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "ON_FAILURE"
