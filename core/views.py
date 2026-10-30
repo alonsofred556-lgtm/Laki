@@ -379,7 +379,30 @@ def auth_challenge(request):
 
 def verify_signature(challenge, signature):
     if challenge.chain in EVM_CHAINS:
-        recovered = Account.recover_message(encode_defunct(text=challenge.message), signature=signature)
+        if not isinstance(signature, str):
+            return False
+        value = signature.strip()
+        # EIP-1193 wallets normally return a 65-byte 0x-prefixed signature.
+        # Some providers return the same bytes without the prefix; normalize
+        # both forms before eth-account recovery. EIP-2098 compact signatures
+        # are expanded to r||s||v for older eth-account versions.
+        if re.fullmatch(r"0x[a-fA-F0-9]{128}", value):
+            compact = bytes.fromhex(value[2:])
+            r = compact[:32]
+            vs = int.from_bytes(compact[32:], "big")
+            parity = (vs >> 255) & 1
+            s = (vs & ((1 << 255) - 1)).to_bytes(32, "big")
+            value = "0x" + (r + s + bytes([parity + 27])).hex()
+        elif re.fullmatch(r"(?:0x)?[a-fA-F0-9]{130}", value):
+            raw = bytes.fromhex(value[2:] if value.startswith("0x") else value)
+            if raw[-1] in (0, 1):
+                raw = raw[:64] + bytes([raw[-1] + 27])
+            value = "0x" + raw.hex()
+        elif re.fullmatch(r"[a-fA-F0-9]{128}", value):
+            value = "0x" + value
+        if not re.fullmatch(r"0x[a-fA-F0-9]{130}", value):
+            return False
+        recovered = Account.recover_message(encode_defunct(text=challenge.message), signature=value)
         return recovered.lower() == challenge.address.lower()
     try:
         public_key = base58.b58decode(challenge.address)

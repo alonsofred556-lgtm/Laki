@@ -8,15 +8,29 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "coni_backend.settings")
 import django
 from django.conf import settings
 from django.test import SimpleTestCase, TestCase
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 django.setup()
 
 from .bot_controls import BOT_MODES
 from .models import WalletIdentity
-from .views import canonical_wallet_address, session_identity, session_identities, wallet_address_matches
+from .views import canonical_wallet_address, session_identity, session_identities, verify_signature, wallet_address_matches
 
 
 class WalletAuthenticationTests(SimpleTestCase):
+    def test_evm_signature_recovery_accepts_standard_and_unprefixed_hex(self):
+        account = Account.create()
+        message = "coni login challenge"
+        challenge = SimpleNamespace(chain="base", address=account.address.lower(), message=message)
+        signed = Account.sign_message(encode_defunct(text=message), account.key).signature.hex()
+        self.assertTrue(verify_signature(challenge, "0x" + signed))
+        self.assertTrue(verify_signature(challenge, signed))
+
+    def test_evm_signature_recovery_rejects_invalid_shape(self):
+        challenge = SimpleNamespace(chain="base", address="0x" + "1" * 40, message="coni login challenge")
+        self.assertFalse(verify_signature(challenge, "0x1234"))
+
     def test_evm_addresses_are_canonicalized_before_persistence(self):
         address = "0xAbCd000000000000000000000000000000000001"
         self.assertEqual(canonical_wallet_address("base", address), address.lower())
