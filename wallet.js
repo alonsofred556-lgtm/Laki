@@ -416,10 +416,13 @@
       // Uint8Array; the second encoding argument is not part of the Solana
       // signMessage contract and causes SafePal to produce an incompatible
       // result on some versions.
-      // Phantom and SafePal both follow the Solana wallet-adapter contract:
-      // signMessage receives the UTF-8 bytes as its only argument.
-      const signed = await provider.signMessage(messageBytes);
+      // Phantom follows the wallet-adapter byte contract. SafePal supports
+      // both forms, but some extension versions return an empty result for a
+      // Uint8Array and require the documented string form instead.
+      const isSafePal = provider === window.safepal || provider === window.safepalwallet?.solana;
+      const signed = await provider.signMessage(isSafePal ? messageText : messageBytes);
       const bytes = solanaSignatureBytes(signed);
+      if (!bytes.length) throw new Error("The wallet returned an empty Solana signature; approve the message and try again.");
       return btoa(String.fromCharCode(...bytes));
     }, "external-bot");
     try {
@@ -441,14 +444,15 @@
     if (value instanceof ArrayBuffer) return new Uint8Array(value);
     if (Array.isArray(value)) return Uint8Array.from(value);
     if (typeof value !== "string") throw new Error("SafePal returned an unsupported Solana signature format");
+    const encodedValue = value.startsWith("0x") ? value.slice(2) : value;
     // Some providers return base64; accept it before falling back to the
     // base58 representation commonly used by Solana tooling.
-    if (/^[A-Za-z0-9+/]+={0,2}$/.test(value) && value.length % 4 === 0) {
-      try { return Uint8Array.from(atob(value), (char) => char.charCodeAt(0)); } catch { /* try base58 */ }
+    if (/^[A-Za-z0-9+/]+={0,2}$/.test(encodedValue) && encodedValue.length % 4 === 0) {
+      try { return Uint8Array.from(atob(encodedValue), (char) => char.charCodeAt(0)); } catch { /* try base58 */ }
     }
     const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     const digits = [0];
-    for (const char of value) {
+    for (const char of encodedValue) {
       const index = alphabet.indexOf(char);
       if (index < 0) throw new Error("SafePal returned an invalid Solana signature");
       let carry = index;
@@ -459,8 +463,8 @@
       }
       while (carry) { digits.push(carry & 255); carry >>= 8; }
     }
-    const leadingZeroes = [...value].findIndex((char) => char !== "1");
-    const zeros = leadingZeroes < 0 ? value.length : leadingZeroes;
+    const leadingZeroes = [...encodedValue].findIndex((char) => char !== "1");
+    const zeros = leadingZeroes < 0 ? encodedValue.length : leadingZeroes;
     return Uint8Array.from([...new Array(zeros).fill(0), ...digits.reverse()]);
   }
 

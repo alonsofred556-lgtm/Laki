@@ -429,16 +429,17 @@ def verify_signature(challenge, signature):
         if not isinstance(signature, str):
             return False
         candidates = []
+        encoded_signature = signature[2:] if signature.startswith("0x") else signature
         try:
-            candidates.append(base64.b64decode(signature, validate=True))
+            candidates.append(base64.b64decode(encoded_signature, validate=True))
         except (ValueError, base64.binascii.Error):
             pass
         try:
-            candidates.append(base58.b58decode(signature))
+            candidates.append(base58.b58decode(encoded_signature))
         except ValueError:
             pass
-        if re.fullmatch(r"(?:0x)?[a-fA-F0-9]{128}", signature):
-            candidates.append(bytes.fromhex(signature[2:] if signature.startswith("0x") else signature))
+        if re.fullmatch(r"[a-fA-F0-9]{128}", encoded_signature):
+            candidates.append(bytes.fromhex(encoded_signature))
         message = challenge.message.encode("utf-8")
         for signed in candidates:
             if len(signed) != 64:
