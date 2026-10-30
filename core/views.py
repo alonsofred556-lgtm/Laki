@@ -426,9 +426,29 @@ def verify_signature(challenge, signature):
         return False
     try:
         public_key = base58.b58decode(challenge.address)
-        signed = base64.b64decode(signature, validate=True)
-        VerifyKey(public_key).verify(challenge.message.encode("utf-8"), signed)
-        return True
+        if not isinstance(signature, str):
+            return False
+        candidates = []
+        try:
+            candidates.append(base64.b64decode(signature, validate=True))
+        except (ValueError, base64.binascii.Error):
+            pass
+        try:
+            candidates.append(base58.b58decode(signature))
+        except ValueError:
+            pass
+        if re.fullmatch(r"(?:0x)?[a-fA-F0-9]{128}", signature):
+            candidates.append(bytes.fromhex(signature[2:] if signature.startswith("0x") else signature))
+        message = challenge.message.encode("utf-8")
+        for signed in candidates:
+            if len(signed) != 64:
+                continue
+            try:
+                VerifyKey(public_key).verify(message, signed)
+                return True
+            except BadSignatureError:
+                continue
+        return False
     except (ValueError, BadSignatureError):
         return False
 
