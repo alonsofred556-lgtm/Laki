@@ -144,6 +144,7 @@
     const candidates = [
       ["Phantom", window.phantom?.solana],
       ["OKX Wallet", window.okxwallet?.solana],
+      ["SafePal", window.safepal],
       ["SafePal", window.safepalwallet?.solana],
       ["Solflare", window.solflare],
       ["Backpack", window.backpack?.solana],
@@ -192,7 +193,7 @@
   function providerLabel(provider, isSolana = false) {
     if (!provider) return isSolana ? "Solana wallet" : "EVM wallet";
     if (provider.isOkxWallet || provider === window.okxwallet?.ethereum || provider === window.okxwallet?.solana) return "OKX Wallet";
-    if (provider.isSafePal || provider === window.safepalProvider || provider === window.safepalwallet?.solana) return "SafePal";
+    if (provider.isSafePal || provider === window.safepalProvider || provider === window.safepal || provider === window.safepalwallet?.solana) return "SafePal";
     if (provider.isPhantom || provider === window.phantom?.ethereum || provider === window.phantom?.solana) return "Phantom";
     if (provider.isMetaMask) return "MetaMask";
     if (provider.isRabby) return "Rabby";
@@ -413,7 +414,15 @@
       balance = `${(Number(result?.value || 0) / 1e9).toFixed(5)} SOL`;
     } catch { /* balance stays connected when the private relay is unavailable */ }
     await authenticateWallet("solana", address, async (messageText) => {
-      const signed = await provider.signMessage(new TextEncoder().encode(messageText), "utf8");
+      const messageBytes = new TextEncoder().encode(messageText);
+      // SafePal's Solana provider accepts the message bytes as its only
+      // argument. Other wallet-adapter compatible providers also accept the
+      // Uint8Array; the second encoding argument is not part of the Solana
+      // signMessage contract and causes SafePal to produce an incompatible
+      // result on some versions.
+      const signed = provider === window.safepal
+        ? await provider.signMessage(messageBytes)
+        : await provider.signMessage(messageBytes, "utf8");
       const bytes = signed.signature || signed;
       return btoa(String.fromCharCode(...bytes));
     }, "external-bot");
@@ -496,10 +505,26 @@
     }
     $("#connection-list").innerHTML = connections.map((item) => {
       const isSolana = item === state.solana;
-      return `<div class="connection-row"><span class="provider-icon ${isSolana ? "sol" : "eth"}">${isSolana ? "S" : "E"}</span><div><strong>${item.providerName || (isSolana ? "Solana wallet" : "EVM wallet")}</strong><small>${short(item.address)} · ${isSolana ? "Solana" : item.chainName}</small></div><span class="connection-balance">${item.balance}</span><span class="connected-dot">●</span></div>`;
+      return `<div class="connection-row"><span class="provider-icon ${isSolana ? "sol" : "eth"}">${isSolana ? "S" : "E"}</span><div><strong>${item.providerName || (isSolana ? "Solana wallet" : "EVM wallet")}</strong><small>${short(item.address)} · ${isSolana ? "Solana" : item.chainName}</small></div><span class="connection-balance">${item.balance}</span><span class="connected-dot">●</span><button class="ghost-button connection-disconnect" data-disconnect-wallet="${isSolana ? "solana" : "evm"}">Disconnect</button></div>`;
     }).join("");
     if (state.evm) $("#eth-balance").textContent = state.evm.balance;
     if (state.solana) $("#sol-balance").textContent = state.solana.balance;
+  }
+
+  async function disconnectWallet(kind) {
+    const identity = kind === "solana" ? state.solana : state.evm;
+    if (!identity) return;
+    if (kind === "solana") state.solana = null;
+    else state.evm = null;
+    saveConnections();
+    renderConnections();
+    activeBotWallet = null;
+    botWalletSnapshot = null;
+    $("#bot-wallet-state").textContent = "CONNECT FIRST";
+    $("#bot-wallet-content").innerHTML = `<div class="vault-ring large"><span>⌁</span></div><div><strong>Bot wallet paused</strong><p>Connect a wallet to view its separate bot-wallet record.</p></div>`;
+    await logoutWalletIdentity({ chain: identity.chain, address: identity.address });
+    message(`${identity.providerName || "Wallet"} disconnected. Fast Wallet remains available.`, "success");
+    renderLocalVaultTools();
   }
 
   async function prepareFunding() {
@@ -1255,6 +1280,11 @@
 
   $("#connect-evm").addEventListener("click", (event) => runBusy(event.currentTarget, connectEvm));
   $("#connect-solana").addEventListener("click", (event) => runBusy(event.currentTarget, connectSolana));
+  $("#open-fast-wallet")?.addEventListener("click", () => { $("#vault-modal").hidden = false; document.body.style.overflow = "hidden"; });
+  $("#connection-list")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-disconnect-wallet]");
+    if (button) runBusy(button, () => disconnectWallet(button.dataset.disconnectWallet));
+  });
   $("#evm-wallet-choice")?.addEventListener("change", (event) => {
     if (event.target.value) localStorage.setItem(EVM_PROVIDER_KEY, event.target.value);
   });
