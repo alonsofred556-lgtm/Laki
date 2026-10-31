@@ -246,9 +246,10 @@
     $("#preview-read-at").textContent = snapshotTime ? `Snapshot ${formatAge(new Date(snapshotTime).getTime() / 1000)}` : "Snapshot time unavailable";
     $("#preview-quote").textContent = "Requesting fresh read-only Pangea quotes for $10…";
     const prepare = $("#prepare-route");
-    prepare.disabled = !persisted || decision.executable !== true;
+    prepare.disabled = !persisted;
     prepare.dataset.opportunityId = persisted?.id || "";
-    prepare.textContent = !persisted ? "Run scanner worker first" : decision.executable === true ? "Prepare bot route →" : "Waiting for quote clearance";
+    prepare.dataset.slug = item.slug;
+    prepare.textContent = !persisted ? "Refresh route first" : "Review fresh route →";
     openModal("#preview-modal");
     if (!persisted) {
       try {
@@ -260,9 +261,10 @@
           if (persisted) {
             state.persistedOpportunities.push(persisted);
             const freshDecision = persisted.decisionSummary || persisted.decision || {};
-            prepare.disabled = freshDecision.executable !== true;
+            prepare.disabled = false;
             prepare.dataset.opportunityId = persisted.id;
-            prepare.textContent = freshDecision.executable === true ? "Prepare bot route →" : "Waiting for quote clearance";
+            prepare.dataset.slug = item.slug;
+            prepare.textContent = "Review fresh route →";
             const lastNet = numberValue(freshDecision.netProfitUsd ?? persisted.netProfitUsd);
             if (lastNet != null) $("#preview-stats").querySelectorAll(".preview-stat")[1].innerHTML = `<small>Net estimate</small><strong>${money(lastNet, 4)}</strong>`;
             $("#preview-stats").querySelectorAll(".preview-stat")[4].innerHTML = `<small>Quote state</small><strong>${escapeHtml(freshDecision.quoteState || "pending")}</strong>`;
@@ -305,29 +307,37 @@
     if (!bridge.value?.skipped) labels.push(`bridge ${usable(bridge) ? "priced" : "unavailable"}`);
     const scannerNet = numberValue(item.netProfitUsd);
     const netLabel = scannerNet != null ? `scanner net estimate ${money(scannerNet, 4)}` : "net estimate pending scanner quote";
-    $("#preview-quote").textContent = `Pangea read-only quote · $10 notional · ${labels.join(" · ")} · ${netLabel} · execution remains signer-gated`;
+    $("#preview-quote").textContent = `Pangea read-only quote · $10 notional · ${labels.join(" · ")} · ${netLabel} · manual wallet signing required`;
   }
 
   async function prepareRoute(button) {
     const opportunityId = button?.dataset.opportunityId;
     if (!opportunityId) return;
     button.disabled = true;
-    button.textContent = "Checking execution gate…";
+    button.textContent = "Refreshing Pangea quotes…";
     try {
-      const response = await fetch(`${config.apiBaseUrl}/api/execution/plan`, {
+      const item = state.data.launches.map(normalize).find((candidate) => candidate?.slug === button.dataset.slug);
+      const amount = item && quoteAmount(item);
+      const sessionResponse = await fetch(`${config.apiBaseUrl}/api/auth/session`, { credentials: "include", headers: { Accept: "application/json" } });
+      const session = sessionResponse.ok ? await sessionResponse.json() : null;
+      const identities = session?.identities || (session?.wallet ? [session.wallet] : []);
+      const buyWallet = identities.find((identity) => identity.chain === item?.cheapest.chain) || identities.find((identity) => identity.chain !== "solana");
+      const sellWallet = identities.find((identity) => identity.chain === item?.dearest.chain) || identities.find((identity) => identity.chain !== "solana");
+      if (!item || !amount || !buyWallet || !sellWallet) throw new Error("Connect the required wallet sessions before reviewing this route.");
+      const response = await fetch(`${config.apiBaseUrl}/api/manual-arbitrage/prepare`, {
         method: "POST",
         credentials: "include",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ opportunityId })
+        body: JSON.stringify({ slug: item.slug, buyChain: item.cheapest.chain, sellChain: item.dearest.chain, amount: amount.tokens, buyWallet: buyWallet.address, sellWallet: sellWallet.address, slippageBps: 100 })
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || result.reason || "Execution remains gated");
-      $("#preview-quote").textContent = `Execution ${result.execution?.state || "planned"}. The signer must still validate and approve each exact leg.`;
+      if (!response.ok) throw new Error(result.error || result.reason || "Fresh manual route could not be prepared");
+      $("#preview-quote").textContent = "Fresh Pangea quotes prepared. The next step is to sign each returned transaction in your wallet.";
     } catch (error) {
       $("#preview-quote").textContent = error?.message || "Execution remains gated until wallet authentication and signer approval are complete.";
     } finally {
       button.disabled = false;
-      button.textContent = "Prepare bot route →";
+      button.textContent = "Review fresh route →";
     }
   }
 

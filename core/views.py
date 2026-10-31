@@ -1007,6 +1007,135 @@ def quote_proxy(request, kind):
         return error("invalid JSON", 400, request)
 
 
+def _manual_wallet(request, chain):
+    try:
+        return require_session(request, chain=chain)
+    except PermissionError:
+        raise
+
+
+def _manual_payload(request, allowed):
+    payload = body(request)
+    if set(payload) - allowed:
+        raise ValueError("unexpected manual trade fields")
+    return payload
+
+
+@csrf_exempt
+def manual_arbitrage_prepare(request):
+    """Return fresh, read-only buy/bridge/sell quotes for a user-selected route."""
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"slug", "buyChain", "sellChain", "amount", "buyWallet", "sellWallet", "slippageBps"})
+        slug, buy_chain, sell_chain = str(data.get("slug", "")), str(data.get("buyChain", "")), str(data.get("sellChain", ""))
+        if not SLUG_RE.fullmatch(slug) or buy_chain not in CHAINS or sell_chain not in CHAINS or buy_chain == sell_chain or not valid_amount(str(data.get("amount", ""))):
+            return error("invalid manual arbitrage route", 400, request)
+        wallet = str(data.get("buyWallet", ""))
+        _manual_wallet(request, buy_chain)
+        if not wallet_address_valid(buy_chain, wallet):
+            return error("invalid source wallet", 400, request)
+        sell_wallet = str(data.get("sellWallet", "")) or wallet
+        if not wallet_address_valid(sell_chain, sell_wallet):
+            return error("invalid destination wallet", 400, request)
+        slippage = int(data.get("slippageBps", 100))
+        if slippage < 1 or slippage > 1000:
+            return error("invalid slippage", 400, request)
+        amount = str(data["amount"])
+        buy = request_json("/trade/quote", "POST", {"slug": slug, "side": "buy", "chain": buy_chain, "amount": amount, "user": wallet, "slippageBps": slippage})
+        bridge = request_json("/bridge/quote", "POST", {"slug": slug, "from": buy_chain, "to": sell_chain, "amount": amount, "user": wallet, "recipient": sell_wallet, "slippageBps": slippage})
+        sell = request_json("/trade/quote", "POST", {"slug": slug, "side": "sell", "chain": sell_chain, "amount": amount, "user": sell_wallet, "slippageBps": slippage})
+        return api_response({"mode": "manual", "slug": slug, "buyChain": buy_chain, "sellChain": sell_chain, "wallet": wallet, "recipient": sell_wallet, "quotes": {"buy": buy, "bridge": bridge, "sell": sell}, "note": "Quotes are indicative until the wallet-specific unsigned transaction is built."}, 200, request)
+    except PermissionError:
+        return error("authenticated wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid manual arbitrage request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
+@csrf_exempt
+def manual_solana_swap(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"instructions", "addressLookupTableAddresses", "payer"})
+        payer = str(data.get("payer", ""))
+        _manual_wallet(request, "solana")
+        if not wallet_address_valid("solana", payer) or not isinstance(data.get("instructions"), list):
+            return error("invalid Solana swap transaction request", 400, request)
+        if len(data["instructions"]) < 1 or len(data["instructions"]) > 24:
+            return error("invalid Solana instruction count", 400, request)
+        return api_response(request_json("/trade/solana-tx", "POST", data), 200, request)
+    except PermissionError:
+        return error("authenticated Solana wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid Solana swap transaction request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
+@csrf_exempt
+def manual_solana_bridge(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"slug", "to", "amount", "sender", "recipient"})
+        sender, recipient, to = str(data.get("sender", "")), str(data.get("recipient", "")), str(data.get("to", ""))
+        _manual_wallet(request, "solana")
+        if not SLUG_RE.fullmatch(str(data.get("slug", ""))) or to not in EVM_CHAINS or not wallet_address_valid("solana", sender) or not wallet_address_valid(to, recipient) or not valid_amount(str(data.get("amount", ""))):
+            return error("invalid Solana bridge transaction request", 400, request)
+        return api_response(request_json("/bridge/solana-tx", "POST", data), 200, request)
+    except PermissionError:
+        return error("authenticated Solana wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid Solana bridge transaction request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
+@csrf_exempt
+def manual_evm_swap(request):
+    """Return a Pangea EVM quote; the wallet signs the returned transaction client-side."""
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"slug", "side", "chain", "amount", "user", "recipient", "slippageBps"})
+        chain = str(data.get("chain", ""))
+        _manual_wallet(request, chain)
+        if chain not in EVM_CHAINS or data.get("side") not in {"buy", "sell"} or not SLUG_RE.fullmatch(str(data.get("slug", ""))) or not wallet_address_valid(chain, str(data.get("user", ""))) or not valid_amount(str(data.get("amount", ""))):
+            return error("invalid EVM swap transaction request", 400, request)
+        return api_response(request_json("/trade/quote", "POST", data), 200, request)
+    except PermissionError:
+        return error("authenticated EVM wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid EVM swap transaction request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
+@csrf_exempt
+def manual_arbitrage_status(request):
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"txHash", "chain", "bridgeTxHash"})
+        chain, tx_hash = str(data.get("chain", "")), str(data.get("txHash", ""))
+        _manual_wallet(request, chain)
+        if chain not in CHAINS or not tx_hash or len(tx_hash) > 200:
+            return error("invalid transaction status request", 400, request)
+        result = {"transaction": request_json("/chain/tx", "POST", {"chain": chain, "hash": tx_hash})}
+        if data.get("bridgeTxHash"):
+            result["bridge"] = request_json("/bridge/arrival", "POST", {"txHash": str(data["bridgeTxHash"])})
+        return api_response(result, 200, request)
+    except PermissionError:
+        return error("authenticated wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid transaction status request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
 @csrf_exempt
 def funding_intent(request):
     if request.method != "POST" or not post_allowed(request):
