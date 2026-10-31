@@ -18,6 +18,7 @@
   const FAST_WALLET_IDLE_MS = 15 * 60 * 1000;
   const EVM_PROVIDER_KEY = "coni.wallet.evm-provider.v1";
   const SOLANA_PROVIDER_KEY = "coni.wallet.solana-provider.v1";
+  const UNIFIED_PROVIDER_KEY = "coni.wallet.unified-provider.v1";
   const announcedEvmProviders = new Map();
   const pangeaTokens = new Map();
   const fundingAssets = new Map();
@@ -173,9 +174,50 @@
     select.hidden = options.length < 2;
   }
 
+  function providerVendor(provider, advertisedName = "", isSolana = false) {
+    const text = `${advertisedName} ${provider?.name || ""} ${provider?.label || ""}`.toLowerCase();
+    if (provider?.isOkxWallet || provider === window.okxwallet?.ethereum || provider === window.okxwallet?.solana || text.includes("okx")) return "okx";
+    if (provider?.isSafePal || provider === window.safepalProvider || provider === window.safepal || provider === window.safepalwallet?.solana || text.includes("safepal")) return "safepal";
+    if (provider?.isPhantom || provider === window.phantom?.ethereum || provider === window.phantom?.solana || text.includes("phantom")) return "phantom";
+    return isSolana ? "solana" : "evm";
+  }
+
+  function unifiedProviderOptions() {
+    const evm = evmProviderOptions();
+    const solana = solanaProviderOptions();
+    const order = ["okx", "safepal", "phantom"];
+    return order.map((vendor) => {
+      const evmItem = evm.find((item) => providerVendor(item.provider, item.name) === vendor);
+      const solanaItem = solana.find((item) => providerVendor(item.provider, item.name, true) === vendor);
+      if (!evmItem || !solanaItem) return null;
+      return { key: vendor, name: vendor === "okx" ? "OKX Wallet" : vendor === "safepal" ? "SafePal" : "Phantom", evmItem, solanaItem };
+    }).filter(Boolean);
+  }
+
+  function setUnifiedProviderOptions() {
+    const select = $("#unified-wallet-choice");
+    if (!select) return;
+    const options = unifiedProviderOptions();
+    const current = localStorage.getItem(UNIFIED_PROVIDER_KEY) || "";
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = options.length ? "Choose one wallet provider" : "Install OKX, SafePal, or Phantom";
+    select.appendChild(placeholder);
+    options.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.key;
+      option.textContent = item.name;
+      select.appendChild(option);
+    });
+    select.value = options.some((item) => item.key === current) ? current : (options.length === 1 ? options[0].key : "");
+    select.disabled = !options.length;
+  }
+
   function renderProviderChoices() {
     setProviderOptions("#evm-wallet-choice", evmProviderOptions(), EVM_PROVIDER_KEY, "EVM wallet");
     setProviderOptions("#solana-wallet-choice", solanaProviderOptions(), SOLANA_PROVIDER_KEY, "Solana wallet");
+    setUnifiedProviderOptions();
   }
 
   function providerForEvm() {
@@ -192,9 +234,10 @@
 
   function providerLabel(provider, isSolana = false) {
     if (!provider) return isSolana ? "Solana wallet" : "EVM wallet";
-    if (provider.isOkxWallet || provider === window.okxwallet?.ethereum || provider === window.okxwallet?.solana) return "OKX Wallet";
-    if (provider.isSafePal || provider === window.safepalProvider || provider === window.safepal || provider === window.safepalwallet?.solana) return "SafePal";
-    if (provider.isPhantom || provider === window.phantom?.ethereum || provider === window.phantom?.solana) return "Phantom";
+    const vendor = providerVendor(provider, "", isSolana);
+    if (vendor === "okx") return "OKX Wallet";
+    if (vendor === "safepal") return "SafePal";
+    if (vendor === "phantom") return "Phantom";
     if (provider.isMetaMask) return "MetaMask";
     if (provider.isRabby) return "Rabby";
     return isSolana ? "Solana wallet" : "EVM wallet";
@@ -365,7 +408,7 @@
     const provider = providerForEvm();
     if (!provider) {
       message("No EVM wallet detected. Install MetaMask, Rabby, Coinbase Wallet, OKX, or Phantom EVM, then try again.", "error");
-      return;
+      return false;
     }
     try {
       message("Waiting for wallet approval…");
@@ -378,7 +421,7 @@
         state.evm = null;
         renderConnections();
         message("Wallet connected on an unsupported network. Switch to Ethereum, Base, Robinhood Chain, or BNB Chain.", "error");
-        return;
+        return false;
       }
       const balance = await readEvmBalance(provider, address);
       const chain = Object.entries(config.wallets.evmChains).find(([, id]) => id === chainId)?.[0];
@@ -401,8 +444,10 @@
         await connectEvm();
       });
       provider.on?.("chainChanged", () => connectEvm());
+      return true;
     } catch (error) {
       message(error?.message || "The EVM wallet connection was cancelled.", "error");
+      return false;
     }
   }
 
@@ -521,7 +566,7 @@
     const provider = providerForSolana();
     if (!provider?.connect) {
       message("No Solana wallet detected. Install Phantom, Solflare, or Backpack, then try again.", "error");
-      return;
+      return false;
     }
     try {
       message("Waiting for Solana wallet approval…");
@@ -530,23 +575,26 @@
       await establishSolanaSession(provider, address);
       bindSolanaProvider(provider);
       message("Solana wallet connected.", "success");
+      return true;
     } catch (error) {
       message(error?.message || "The Solana wallet connection was cancelled.", "error");
+      return false;
     }
   }
 
   async function connectUnified() {
-    const evmProvider = providerForEvm();
-    const evmName = providerLabel(evmProvider);
-    const matchingSolana = solanaProviderOptions().find((item) => providerLabel(item.provider, true) === evmName);
-    if (!evmProvider || !matchingSolana) {
-      throw new Error("Choose SafePal or OKX in both wallet selectors, then try again.");
+    const options = unifiedProviderOptions();
+    const selected = $("#unified-wallet-choice")?.value || localStorage.getItem(UNIFIED_PROVIDER_KEY) || (options.length === 1 ? options[0].key : "");
+    const pair = options.find((item) => item.key === selected);
+    if (!pair) {
+      throw new Error(options.length ? "Choose one wallet provider, then try again." : "Install the same wallet provider with EVM and Solana support, such as OKX, SafePal, or Phantom.");
     }
-    const evmKey = evmProviderOptions().find((item) => item.provider === evmProvider)?.key;
-    localStorage.setItem(EVM_PROVIDER_KEY, evmKey || "");
-    localStorage.setItem(SOLANA_PROVIDER_KEY, matchingSolana.key);
-    await connectEvm();
-    await connectSolana();
+    localStorage.setItem(UNIFIED_PROVIDER_KEY, pair.key);
+    localStorage.setItem(EVM_PROVIDER_KEY, pair.evmItem.key);
+    localStorage.setItem(SOLANA_PROVIDER_KEY, pair.solanaItem.key);
+    const evmName = pair.name;
+    if (!await connectEvm()) throw new Error(`${evmName} EVM connection was not completed.`);
+    if (!await connectSolana()) throw new Error(`${evmName} Solana connection was not completed.`);
     message(`${evmName} connected across EVM and Solana.`, "success");
   }
 
@@ -1346,6 +1394,13 @@
   $("#solana-wallet-choice")?.addEventListener("change", (event) => {
     if (event.target.value) localStorage.setItem(SOLANA_PROVIDER_KEY, event.target.value);
   });
+  $("#unified-wallet-choice")?.addEventListener("change", (event) => {
+    const selected = unifiedProviderOptions().find((item) => item.key === event.target.value);
+    if (!selected) return;
+    localStorage.setItem(UNIFIED_PROVIDER_KEY, selected.key);
+    localStorage.setItem(EVM_PROVIDER_KEY, selected.evmItem.key);
+    localStorage.setItem(SOLANA_PROVIDER_KEY, selected.solanaItem.key);
+  });
   $("#bot-wallet-chain")?.addEventListener("change", (event) => selectBotWallet(event.target.value));
   $("#prepare-funding").addEventListener("click", (event) => runBusy(event.currentTarget, prepareFunding));
   $("#approve-funding").addEventListener("click", (event) => runBusy(event.currentTarget, () => approveFunding().catch((error) => { $("#funding-status").textContent = error?.message || "Wallet approval failed."; })));
@@ -1397,7 +1452,7 @@
     if (state.evm?.authenticated || state.solana?.authenticated) loadBotWallet();
   }, 15000);
   const requestedConnect = new URLSearchParams(window.location.search).get("connect");
-  if (requestedConnect === "evm" || requestedConnect === "solana") {
-    window.setTimeout(() => (requestedConnect === "evm" ? connectEvm() : connectSolana()), 0);
+  if (requestedConnect === "unified" || requestedConnect === "evm" || requestedConnect === "solana") {
+    window.setTimeout(() => (requestedConnect === "unified" ? connectUnified() : requestedConnect === "evm" ? connectEvm() : connectSolana()).catch?.((error) => message(error?.message || "Wallet connection failed.", "error")), 0);
   }
 })();
