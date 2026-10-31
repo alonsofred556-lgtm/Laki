@@ -37,6 +37,7 @@ urlpatterns = [
     path("manual-arbitrage/solana-bridge", views.manual_solana_bridge),
     path("manual-arbitrage/evm-swap", views.manual_evm_swap),
     path("manual-arbitrage/status", views.manual_arbitrage_status),
+    path("manual-arbitrage/balance", views.manual_arbitrage_balance),
     path("funding/intent", views.funding_intent),
     path("funding/assets", views.funding_assets),
     path("funding/claim", views.funding_claim),

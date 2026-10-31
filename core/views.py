@@ -8,6 +8,7 @@ import secrets
 import uuid
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlencode
 
 import base58
 from django.conf import settings
@@ -1132,6 +1133,29 @@ def manual_arbitrage_status(request):
         return error("authenticated wallet session required", 401, request)
     except (ValueError, json.JSONDecodeError):
         return error("invalid transaction status request", 400, request)
+    except PangeaError as exc:
+        return error(str(exc), 502, request)
+
+
+@csrf_exempt
+def manual_arbitrage_balance(request):
+    """Read a verified Pangea token/native balance for the connected wallet."""
+    if request.method != "POST" or not post_allowed(request):
+        return error("method or origin not allowed", 405 if request.method != "POST" else 403, request)
+    try:
+        data = _manual_payload(request, {"slug", "chain", "address", "asset"})
+        slug, chain, address = str(data.get("slug", "")), str(data.get("chain", "")), str(data.get("address", ""))
+        _manual_wallet(request, chain)
+        if not SLUG_RE.fullmatch(slug) or chain not in CHAINS or not wallet_address_valid(chain, address):
+            return error("invalid balance request", 400, request)
+        query = {"token": slug, "chain": chain, "address": address}
+        if str(data.get("asset", "token")) == "native":
+            query["asset"] = "native"
+        return api_response(request_json("/bridge/balance?" + urlencode(query)), 200, request)
+    except PermissionError:
+        return error("authenticated wallet session required", 401, request)
+    except (ValueError, json.JSONDecodeError):
+        return error("invalid balance request", 400, request)
     except PangeaError as exc:
         return error(str(exc), 502, request)
 

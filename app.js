@@ -14,7 +14,7 @@
       ] }
     ]
   };
-  const state = { data: fallback, live: false, motion: null, history: null, bridgeActivity: null, metadata: new Map(), persistedOpportunities: [], activityLoadedAt: 0, quoteRequest: 0, previewRequest: 0, visibleOpportunityCount: 24 };
+  const state = { data: fallback, live: false, motion: null, history: null, bridgeActivity: null, metadata: new Map(), persistedOpportunities: [], previewBalances: new Map(), activityLoadedAt: 0, quoteRequest: 0, previewRequest: 0, visibleOpportunityCount: 24 };
   let marketRefreshController = null;
   const $ = (selector) => document.querySelector(selector);
   const money = (value, digits = 2) => value == null || Number.isNaN(value) ? "—" : `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}`;
@@ -219,6 +219,37 @@
 
   function openModal(id) { $(id).hidden = false; document.body.style.overflow = "hidden"; }
   function closeModal(target) { target.closest(".modal-backdrop").hidden = true; document.body.style.overflow = ""; }
+
+  async function loadPreviewBalances(item, previewRequest) {
+    try {
+      const sessionResponse = await fetch(`${config.apiBaseUrl}/api/auth/session`, { credentials: "include", headers: { Accept: "application/json" } });
+      if (!sessionResponse.ok) return;
+      const session = await sessionResponse.json();
+      const identities = session?.identities || (session?.wallet ? [session.wallet] : []);
+      const addresses = item.addresses || {};
+      const route = [item.cheapest, item.dearest];
+      await Promise.all(route.map(async (pool) => {
+        const identity = identities.find((candidate) => candidate.chain === pool.chain) || identities.find((candidate) => pool.chain !== "solana" && candidate.chain !== "solana");
+        if (!identity?.address) return;
+        const response = await fetch(`${config.apiBaseUrl}/api/manual-arbitrage/balance`, {
+          method: "POST", credentials: "include", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ slug: item.slug, chain: pool.chain, address: identity.address, asset: "token" })
+        });
+        if (!response.ok || previewRequest !== state.previewRequest) return;
+        const balance = await response.json();
+        state.previewBalances.set(pool.chain, { ...balance, address: identity.address, tokenAddress: addresses[pool.chain] || null });
+      }));
+      if (previewRequest !== state.previewRequest) return;
+      document.querySelectorAll("[data-preview-chain]").forEach((row) => {
+        const balance = state.previewBalances.get(row.dataset.previewChain);
+        if (!balance) return;
+        const address = balance.tokenAddress || "Not supplied by Pangea";
+        row.querySelector(".preview-contract").textContent = `CA/mint ${address}`;
+        row.querySelector(".preview-balance").textContent = `Wallet ${balance.balance == null ? "unavailable" : formatPrice(Number(balance.balance) / (10 ** Number(balance.decimals || 0)))} · ${balance.address}`;
+      });
+    } catch { /* balance display is informative and never blocks quote review */ }
+  }
+
   async function openPreview(item) {
     if (!item) return;
     const previewRequest = ++state.previewRequest;
@@ -241,7 +272,8 @@
       const poolMarketCap = pool.marketCapUsd || marketCapFor(pool.priceUsd, item) || launchMarketCap;
       const role = pool.chain === item.cheapest.chain ? "BUY · cheaper pool" : "SELL · dearer pool";
       const poolDepth = numberValue(pool.depth || pool.depthUsd || pool.liquidityUsd);
-      return `<div class="preview-chain-row"><div><span class="chain-dot ${escapeHtml(pool.chain)}"></span><strong>${escapeHtml(chainNames[pool.chain] || pool.chain)}</strong><small>${role}</small></div><div><small>Price</small><strong>${formatPrice(pool.priceUsd)}</strong></div><div><small>Market cap</small><strong>${formatMarketCap(poolMarketCap)}</strong></div><div><small>Depth</small><strong>${poolDepth == null ? "—" : compact(poolDepth)}</strong></div></div>`;
+      const tokenAddress = item.addresses?.[pool.chain] || "Not supplied by Pangea";
+      return `<div class="preview-chain-row" data-preview-chain="${escapeHtml(pool.chain)}"><div><span class="chain-dot ${escapeHtml(pool.chain)}"></span><strong>${escapeHtml(chainNames[pool.chain] || pool.chain)}</strong><small>${role}</small><small class="preview-contract">CA/mint ${escapeHtml(tokenAddress)}</small><small class="preview-balance">Wallet balance loading…</small></div><div><small>Price</small><strong>${formatPrice(pool.priceUsd)}</strong></div><div><small>Market cap</small><strong>${formatMarketCap(poolMarketCap)}</strong></div><div><small>Depth</small><strong>${poolDepth == null ? "—" : compact(poolDepth)}</strong></div></div>`;
     }).join("");
     $("#preview-read-at").textContent = snapshotTime ? `Snapshot ${formatAge(new Date(snapshotTime).getTime() / 1000)}` : "Snapshot time unavailable";
     $("#preview-quote").textContent = "Requesting fresh read-only Pangea quotes for $10…";
@@ -273,6 +305,7 @@
       } catch { /* the route remains a read-only preview when persistence is unavailable */ }
     }
     loadRouteQuotes(item);
+    loadPreviewBalances(item, previewRequest);
   }
 
   function quoteAmount(item) {
